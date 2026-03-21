@@ -56,43 +56,53 @@ class Transaction(BaseModel):
     warehouse_id: int
     store_id: Optional[int] = None
 
-# ====== INIT TABLE ======
-execute("""
-CREATE TABLE IF NOT EXISTS products(
-    sku TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    is_active BOOLEAN DEFAULT TRUE
-);
-CREATE TABLE IF NOT EXISTS warehouses(
-    id SERIAL PRIMARY KEY,
-    name TEXT UNIQUE
-);
-CREATE TABLE IF NOT EXISTS stores(
-    id SERIAL PRIMARY KEY,
-    name TEXT UNIQUE
-);
-CREATE TABLE IF NOT EXISTS inventory(
-    sku TEXT NOT NULL,
-    warehouse_id INTEGER,
-    quantity INTEGER DEFAULT 0,
-    UNIQUE(sku, warehouse_id)
-);
-CREATE TABLE IF NOT EXISTS store_inventory(
-    sku TEXT NOT NULL,
-    store_id INTEGER,
-    quantity INTEGER DEFAULT 0,
-    UNIQUE(sku, store_id)
-);
-CREATE TABLE IF NOT EXISTS history(
-    id SERIAL PRIMARY KEY,
-    sku TEXT NOT NULL,
-    type TEXT NOT NULL,
-    quantity INTEGER NOT NULL,
-    warehouse_id INTEGER,
-    store_id INTEGER,
-    created_at TIMESTAMP DEFAULT now()
-);
-""")
+# ====== INIT TABLE (FIXED) ======
+def init_db():
+    queries = [
+        """CREATE TABLE IF NOT EXISTS products(
+            sku TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            is_active BOOLEAN DEFAULT TRUE
+        )""",
+        """CREATE TABLE IF NOT EXISTS warehouses(
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE
+        )""",
+        """CREATE TABLE IF NOT EXISTS stores(
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE
+        )""",
+        """CREATE TABLE IF NOT EXISTS inventory(
+            sku TEXT NOT NULL,
+            warehouse_id INTEGER,
+            quantity INTEGER DEFAULT 0,
+            UNIQUE(sku, warehouse_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS store_inventory(
+            sku TEXT NOT NULL,
+            store_id INTEGER,
+            quantity INTEGER DEFAULT 0,
+            UNIQUE(sku, store_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS history(
+            id SERIAL PRIMARY KEY,
+            sku TEXT NOT NULL,
+            type TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            warehouse_id INTEGER,
+            store_id INTEGER,
+            created_at TIMESTAMP DEFAULT now()
+        )"""
+    ]
+
+    for q in queries:
+        try:
+            execute(q)
+        except Exception as e:
+            print("❌ INIT DB ERROR:", e)
+
+# chạy init khi start app
+init_db()
 
 # ====== API ======
 
@@ -156,7 +166,6 @@ def get_store_inventory():
 def transaction(tx: Transaction):
     with engine.begin() as conn:
 
-        # ===== inventory =====
         res = conn.execute(
             text("SELECT quantity FROM inventory WHERE sku=:sku AND warehouse_id=:w"),
             {"sku": tx.sku, "w": tx.warehouse_id}
@@ -180,7 +189,6 @@ def transaction(tx: Transaction):
                 {"sku": tx.sku, "w": tx.warehouse_id, "q": new_qty}
             )
 
-        # ===== store inventory =====
         if tx.type == "Xuất" and tx.store_id:
             res2 = conn.execute(
                 text("SELECT quantity FROM store_inventory WHERE sku=:sku AND store_id=:sid"),
@@ -201,7 +209,6 @@ def transaction(tx: Transaction):
                     {"sku": tx.sku, "sid": tx.store_id, "q": new2}
                 )
 
-        # ===== history =====
         conn.execute(
             text("INSERT INTO history(sku,type,quantity,warehouse_id,store_id) VALUES (:sku,:type,:q,:w,:sid)"),
             {"sku": tx.sku, "type": tx.type, "q": tx.quantity, "w": tx.warehouse_id, "sid": tx.store_id}
@@ -209,12 +216,17 @@ def transaction(tx: Transaction):
 
     return {"msg": "OK"}
 
-# ====== HISTORY ======
+# ====== HISTORY (SAFE) ======
 @app.get("/history")
 def get_history(limit: int = 100):
-    return fetch_all("""
-    SELECT id, sku, type, quantity, warehouse_id, store_id, created_at
-    FROM history
-    ORDER BY created_at DESC
-    LIMIT :lim
-    """, {"lim": limit})
+    try:
+        limit = int(limit)
+        return fetch_all("""
+        SELECT id, sku, type, quantity, warehouse_id, store_id, created_at
+        FROM history
+        ORDER BY created_at DESC
+        LIMIT :lim
+        """, {"lim": limit})
+    except Exception as e:
+        print("❌ HISTORY ERROR:", e)
+        raise HTTPException(status_code=500, detail="Lỗi lấy lịch sử")

@@ -3,8 +3,8 @@ import pandas as pd
 import requests
 from datetime import datetime
 
-# ================= CẤU HÌNH =================
-API_URL = "https://YOUR_FASTAPI_URL"  # Thay bằng URL FastAPI đã deploy
+# ================= CẤU HÌNH ==========
+API_URL=https://quanlykho-backend.onrender.com # Thay bằng URL FastAPI đã deploy
 
 # ================= CACHE =================
 @st.cache_data(ttl=30)

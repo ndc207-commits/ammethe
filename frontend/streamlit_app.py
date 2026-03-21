@@ -93,10 +93,14 @@ elif menu == "Chuyển kho":
     df_wh = fetch("warehouses")
 
     sku = st.selectbox(
-        "Sản phẩm",
-        df_prod["sku"] + " - " + df_prod["name"]
-    ).split(" - ")[0]
+    "Sản phẩm",
+    df_prod["sku"] + " - " + df_prod["name"]
+)
 
+if sku:  # ✅ Kiểm tra xem sku có phải là None không
+    sku = sku.split(" - ")[0]
+
+    # Tiếp tục xử lý sau khi có sku hợp lệ
     from_wh = st.selectbox("Từ kho", df_wh["name"])
     to_wh = st.selectbox("Đến kho", df_wh["name"])
 
@@ -112,6 +116,8 @@ elif menu == "Chuyển kho":
         st.success("OK")
         st.cache_data.clear()
         st.rerun()
+else:
+    st.warning("Vui lòng chọn sản phẩm.")
 
 # ===== SẢN PHẨM =====
 elif menu == "Sản phẩm":

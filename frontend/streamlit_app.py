@@ -3,27 +3,19 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime
-
-# ====== CẤU HÌNH API ======
 import os
 
+# ====== CẤU HÌNH API ======
 API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
 
-# ====== CACHE DATA ======
 # ====== HÀM FETCH AN TOÀN ======
 def safe_fetch(endpoint: str, params: dict = None, timeout: int = 5):
-    """
-    Gọi API và trả về pd.DataFrame an toàn.
-    - Nếu API trả về JSON hợp lệ list/dict, chuyển sang DataFrame
-    - Nếu lỗi (timeout, connection, JSONDecodeError), trả về DataFrame rỗng
-    """
     try:
         response = requests.get(f"{API_URL}/{endpoint}", params=params or {}, timeout=timeout)
         response.raise_for_status()
         try:
             data = response.json()
             if not isinstance(data, (list, dict)):
-                # nếu API trả về string hoặc HTML
                 st.warning(f"API {endpoint} trả dữ liệu không chuẩn: {data}")
                 data = []
         except ValueError:
@@ -34,8 +26,21 @@ def safe_fetch(endpoint: str, params: dict = None, timeout: int = 5):
         data = []
     return pd.DataFrame(data)
 
+# ====== HÀM POST AN TOÀN ======
+def safe_post(endpoint: str, payload: dict, timeout: int = 5):
+    try:
+        response = requests.post(f"{API_URL}/{endpoint}", json=payload, timeout=timeout)
+        response.raise_for_status()
+        try:
+            return response.json()
+        except ValueError:
+            st.warning(f"API {endpoint} trả JSON không hợp lệ: {response.text[:200]}")
+            return {}
+    except requests.exceptions.RequestException as e:
+        st.warning(f"Lỗi khi gọi API {endpoint}: {e}")
+        return {}
 
-# ====== HÀM FETCH RIÊNG ======
+# ====== CACHE DATA ======
 @st.cache_data(ttl=30)
 def fetch_products(active=True):
     df = safe_fetch("products")
@@ -92,8 +97,11 @@ elif menu=="Thêm sản phẩm":
     sku = st.text_input("SKU")
     name = st.text_input("Tên sản phẩm")
     if st.button("Thêm sản phẩm"):
-        res = requests.post(f"{API_URL}/products/add", json={"sku":sku,"name":name})
-        st.success(res.json()["msg"])
+        res = safe_post("products/add", {"sku":sku,"name":name})
+        if "msg" in res:
+            st.success(res["msg"])
+        else:
+            st.error("Thêm sản phẩm thất bại")
         st.cache_data.clear()
 
 # ====== SỬA / XÓA / PHỤC HỒI ======
@@ -102,27 +110,34 @@ elif menu=="Sửa/Xóa/Phục hồi":
     df_active = fetch_products(active=True)
     df_deleted = fetch_products(active=False)
 
-    # Chọn sản phẩm đang active
     if not df_active.empty:
         sel_active = st.selectbox("Chọn sản phẩm để sửa/xóa", df_active["sku"] + " - " + df_active["name"])
         sku = sel_active.split(" - ")[0]
         new_name = st.text_input("Tên mới", df_active[df_active["sku"]==sku]["name"].values[0])
         if st.button("Cập nhật tên"):
-            requests.post(f"{API_URL}/products/update", json={"sku":sku,"name":new_name})
-            st.success("Đã cập nhật tên")
+            res = safe_post("products/update", {"sku":sku,"name":new_name})
+            if "msg" in res:
+                st.success(res["msg"])
+            else:
+                st.error("Cập nhật thất bại")
             st.cache_data.clear()
         if st.button("Xóa sản phẩm"):
-            requests.post(f"{API_URL}/products/delete", json={"sku":sku})
-            st.success("Đã xóa sản phẩm")
+            res = safe_post("products/delete", {"sku":sku})
+            if "msg" in res:
+                st.success(res["msg"])
+            else:
+                st.error("Xóa thất bại")
             st.cache_data.clear()
 
-    # Phục hồi sản phẩm đã xóa
     if not df_deleted.empty:
         sel_deleted = st.selectbox("Chọn sản phẩm phục hồi", df_deleted["sku"] + " - " + df_deleted["name"])
         sku_recover = sel_deleted.split(" - ")[0]
         if st.button("Phục hồi sản phẩm"):
-            requests.post(f"{API_URL}/products/recover", json={"sku":sku_recover})
-            st.success("Đã phục hồi sản phẩm")
+            res = safe_post("products/recover", {"sku":sku_recover})
+            if "msg" in res:
+                st.success(res["msg"])
+            else:
+                st.error("Phục hồi thất bại")
             st.cache_data.clear()
 
 # ====== NHẬP / XUẤT ======
@@ -143,17 +158,16 @@ elif menu=="Nhập/Xuất":
         df_store = fetch_store_inventory()
         store_list = df_store["store"].unique() if not df_store.empty else ["Cửa hàng 1"]
         store_name = st.selectbox("Chọn cửa hàng nhận hàng", store_list)
-        # Giả sử mapping store -> id: chỉ cần thêm API lấy id nếu cần
         store_id = df_store[df_store["store"]==store_name]["store"].index[0]
 
     if st.button("Xác nhận giao dịch"):
         payload = {"sku":sku,"type":tx_type,"quantity":qty,"warehouse_id":1,"store_id":store_id}
-        res = requests.post(f"{API_URL}/transaction", json=payload)
-        if res.status_code==200:
+        res = safe_post("transaction", payload)
+        if res.get("msg") == "OK":
             st.success("✅ Hoàn tất giao dịch")
             st.cache_data.clear()
         else:
-            st.error(res.json()["detail"])
+            st.error(f"Thất bại: {res.get('detail','Không rõ lỗi')}")
 
 # ====== LỊCH SỬ ======
 elif menu=="Lịch sử":
@@ -169,4 +183,3 @@ elif menu=="Xuất Excel":
         df_hist.to_excel("history.xlsx", index=False)
         with open("history.xlsx","rb") as f:
             st.download_button("Tải xuống", f, file_name="history.xlsx")
-

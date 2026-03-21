@@ -4,7 +4,7 @@ import requests
 from datetime import datetime
 
 # ================= CẤU HÌNH ==========
-    API_URL=https://quanlykho-backend.onrender.com # Thay bằng URL FastAPI đã deploy
+API_URL="https://quanlykho-backend.onrender.com" # Thay bằng URL FastAPI đã deploy
 
 # ================= CACHE =================
 @st.cache_data(ttl=30)

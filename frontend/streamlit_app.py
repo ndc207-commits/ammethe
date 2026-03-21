@@ -5,7 +5,9 @@ import requests
 from datetime import datetime
 
 # ====== CẤU HÌNH API ======
-API_URL = st.secrets.get("API_URL", "https://quanlykho-backend1.onrender.com")
+import os
+
+API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
 
 # ====== CACHE DATA ======
 @st.cache_data(ttl=30)

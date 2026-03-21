@@ -1,3 +1,4 @@
+# backend.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
@@ -17,11 +18,7 @@ app.add_middleware(
 )
 
 # ====== DB CONFIG ======
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-if not DATABASE_URL:
-    raise Exception("❌ Thiếu DATABASE_URL trên Render")
-
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres.acwzgbfrlqykqlhanfdi:Nhutren9989@aws-1-eu-central-1.pooler.supabase.com:5432/postgres")
 engine = create_engine(
     DATABASE_URL,
     pool_size=5,
@@ -31,14 +28,20 @@ engine = create_engine(
 
 # ====== HELPERS ======
 def fetch_all(q, p={}):
-    with engine.connect() as conn:
-        result = conn.execute(text(q), p)
-        return [dict(row._mapping) for row in result]
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text(q), p)
+            return [dict(row._mapping) for row in result]
+    except Exception:
+        return []
 
 def fetch_one(q, p={}):
-    with engine.connect() as conn:
-        result = conn.execute(text(q), p).fetchone()
-        return dict(result._mapping) if result else None
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text(q), p).fetchone()
+            return dict(result._mapping) if result else None
+    except Exception:
+        return None
 
 def execute(q, p={}):
     with engine.begin() as conn:
@@ -56,56 +59,45 @@ class Transaction(BaseModel):
     warehouse_id: int
     store_id: Optional[int] = None
 
-# ====== INIT TABLE (FIXED) ======
-def init_db():
-    queries = [
-        """CREATE TABLE IF NOT EXISTS products(
-            sku TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            is_active BOOLEAN DEFAULT TRUE
-        )""",
-        """CREATE TABLE IF NOT EXISTS warehouses(
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE
-        )""",
-        """CREATE TABLE IF NOT EXISTS stores(
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE
-        )""",
-        """CREATE TABLE IF NOT EXISTS inventory(
-            sku TEXT NOT NULL,
-            warehouse_id INTEGER,
-            quantity INTEGER DEFAULT 0,
-            UNIQUE(sku, warehouse_id)
-        )""",
-        """CREATE TABLE IF NOT EXISTS store_inventory(
-            sku TEXT NOT NULL,
-            store_id INTEGER,
-            quantity INTEGER DEFAULT 0,
-            UNIQUE(sku, store_id)
-        )""",
-        """CREATE TABLE IF NOT EXISTS history(
-            id SERIAL PRIMARY KEY,
-            sku TEXT NOT NULL,
-            type TEXT NOT NULL,
-            quantity INTEGER NOT NULL,
-            warehouse_id INTEGER,
-            store_id INTEGER,
-            created_at TIMESTAMP DEFAULT now()
-        )"""
-    ]
-
-    for q in queries:
-        try:
-            execute(q)
-        except Exception as e:
-            print("❌ INIT DB ERROR:", e)
-
-# chạy init khi start app
-init_db()
+# ====== INIT TABLE ======
+execute("""
+CREATE TABLE IF NOT EXISTS products(
+    sku TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE
+);
+CREATE TABLE IF NOT EXISTS warehouses(
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE
+);
+CREATE TABLE IF NOT EXISTS stores(
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE
+);
+CREATE TABLE IF NOT EXISTS inventory(
+    sku TEXT NOT NULL,
+    warehouse_id INTEGER,
+    quantity INTEGER DEFAULT 0,
+    UNIQUE(sku, warehouse_id)
+);
+CREATE TABLE IF NOT EXISTS store_inventory(
+    sku TEXT NOT NULL,
+    store_id INTEGER,
+    quantity INTEGER DEFAULT 0,
+    UNIQUE(sku, store_id)
+);
+CREATE TABLE IF NOT EXISTS history(
+    id SERIAL PRIMARY KEY,
+    sku TEXT NOT NULL,
+    type TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    warehouse_id INTEGER,
+    store_id INTEGER,
+    created_at TIMESTAMP DEFAULT now()
+);
+""")
 
 # ====== API ======
-
 @app.get("/")
 def root():
     return {"status": "OK"}
@@ -165,18 +157,17 @@ def get_store_inventory():
 @app.post("/transaction")
 def transaction(tx: Transaction):
     with engine.begin() as conn:
-
+        # ===== inventory =====
         res = conn.execute(
             text("SELECT quantity FROM inventory WHERE sku=:sku AND warehouse_id=:w"),
             {"sku": tx.sku, "w": tx.warehouse_id}
         ).fetchone()
-
         cur_qty = res[0] if res else 0
 
         if tx.type == "Xuất" and tx.quantity > cur_qty:
             raise HTTPException(status_code=400, detail="Không đủ hàng")
 
-        new_qty = cur_qty + tx.quantity if tx.type == "Nhập" else cur_qty - tx.quantity
+        new_qty = cur_qty + tx.quantity if tx.type=="Nhập" else cur_qty - tx.quantity
 
         if res:
             conn.execute(
@@ -189,15 +180,14 @@ def transaction(tx: Transaction):
                 {"sku": tx.sku, "w": tx.warehouse_id, "q": new_qty}
             )
 
-        if tx.type == "Xuất" and tx.store_id:
+        # ===== store inventory =====
+        if tx.type=="Xuất" and tx.store_id:
             res2 = conn.execute(
                 text("SELECT quantity FROM store_inventory WHERE sku=:sku AND store_id=:sid"),
                 {"sku": tx.sku, "sid": tx.store_id}
             ).fetchone()
-
             cur2 = res2[0] if res2 else 0
             new2 = cur2 + tx.quantity
-
             if res2:
                 conn.execute(
                     text("UPDATE store_inventory SET quantity=:q WHERE sku=:sku AND store_id=:sid"),
@@ -209,6 +199,7 @@ def transaction(tx: Transaction):
                     {"sku": tx.sku, "sid": tx.store_id, "q": new2}
                 )
 
+        # ===== history =====
         conn.execute(
             text("INSERT INTO history(sku,type,quantity,warehouse_id,store_id) VALUES (:sku,:type,:q,:w,:sid)"),
             {"sku": tx.sku, "type": tx.type, "q": tx.quantity, "w": tx.warehouse_id, "sid": tx.store_id}
@@ -216,17 +207,16 @@ def transaction(tx: Transaction):
 
     return {"msg": "OK"}
 
-# ====== HISTORY (SAFE) ======
+# ====== HISTORY ======
 @app.get("/history")
 def get_history(limit: int = 100):
     try:
-        limit = int(limit)
         return fetch_all("""
         SELECT id, sku, type, quantity, warehouse_id, store_id, created_at
         FROM history
         ORDER BY created_at DESC
         LIMIT :lim
         """, {"lim": limit})
-    except Exception as e:
-        print("❌ HISTORY ERROR:", e)
-        raise HTTPException(status_code=500, detail="Lỗi lấy lịch sử")
+    except Exception:
+        # Trả về list rỗng nếu lỗi
+        return []

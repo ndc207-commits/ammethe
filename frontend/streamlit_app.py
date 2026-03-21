@@ -56,27 +56,6 @@ def fetch_history(limit=200):
     res = api_request("GET", "history", params={"limit": limit})
     return pd.DataFrame(res) if isinstance(res, list) else pd.DataFrame()
 
-# ====== LOGIN ======
-if "token" not in st.session_state:
-    st.title("🔐 Đăng nhập")
-
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    if st.button("Login"):
-        res = requests.post(f"{API_URL}/login", params={
-            "username": username,
-            "password": password
-        }).json()
-
-        if "access_token" in res:
-            st.session_state.token = res["access_token"]
-            st.success("Đăng nhập thành công")
-            st.rerun()
-        else:
-            st.error("Sai tài khoản hoặc mật khẩu")
-
-    st.stop()
 
 # ====== UI ======
 st.title("📦 Quản lý kho AMME THE")

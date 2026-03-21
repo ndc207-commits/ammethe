@@ -3,204 +3,100 @@ import pandas as pd
 import requests
 import os
 
-# ====== CONFIG ======
-API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
+API_URL = os.getenv("API_URL", "http://localhost:8000")
 
-# ====== API CLIENT ======
-def api_request(method, endpoint, params=None, json=None):
-    url = f"{API_URL}/{endpoint}"
-
-    headers = {}
-    if "token" in st.session_state:
-        headers["Authorization"] = f"Bearer {st.session_state.token}"
-
-    try:
-        res = requests.request(
-            method=method,
-            url=url,
-            params=params,
-            json=json,
-            headers=headers,
-            timeout=10
-        )
-
-        if res.status_code >= 400:
-            return {"error": res.text}
-
-        try:
-            return res.json()
-        except:
-            return {}
-
-    except requests.exceptions.RequestException as e:
-        return {"error": str(e)}
-
-# ====== FETCH ======
-@st.cache_data(ttl=30)
-def fetch_products():
-    res = api_request("GET", "products")
-    return pd.DataFrame(res) if isinstance(res, list) else pd.DataFrame()
+def api(method, endpoint, **kwargs):
+    return requests.request(method, f"{API_URL}/{endpoint}", **kwargs).json()
 
 @st.cache_data(ttl=30)
-def fetch_inventory():
-    res = api_request("GET", "inventory")
+def fetch(endpoint):
+    res = api("GET", endpoint)
     return pd.DataFrame(res) if isinstance(res, list) else pd.DataFrame()
 
-@st.cache_data(ttl=30)
-def fetch_store_inventory():
-    res = api_request("GET", "store_inventory")
-    return pd.DataFrame(res) if isinstance(res, list) else pd.DataFrame()
-
-@st.cache_data(ttl=30)
-def fetch_history(limit=200):
-    res = api_request("GET", "history", params={"limit": limit})
-    return pd.DataFrame(res) if isinstance(res, list) else pd.DataFrame()
-
-
-# ====== UI ======
-st.title("📦 Quản lý kho AMME THE")
+st.title("📦 QUẢN LÝ KHO")
 
 menu = st.sidebar.radio("Menu", [
-    "Dashboard", "Kho tổng", "Kho cửa hàng",
-    "Thêm sản phẩm", "Sửa/Xóa/Phục hồi",
-    "Nhập/Xuất", "Lịch sử", "Xuất Excel"
+    "Kho tổng",
+    "Nhập/Xuất",
+    "Chuyển kho",
+    "Tìm kiếm",
+    "Cảnh báo tồn kho",
+    "In phiếu"
 ])
 
-# ====== DASHBOARD ======
-if menu == "Dashboard":
-    st.subheader("📊 Dashboard")
+# ====== KHO ======
+if menu == "Kho tổng":
+    st.dataframe(fetch("inventory"), use_container_width=True)
 
-    df_stock = fetch_inventory()
-    df_store = fetch_store_inventory()
+# ====== NHẬP XUẤT ======
+elif menu == "Nhập/Xuất":
+    df_prod = fetch("products")
+    df_wh = fetch("warehouses")
 
-    col1, col2 = st.columns(2)
+    sku = st.selectbox("Sản phẩm", df_prod["sku"] + " - " + df_prod["name"])
+    sku = sku.split(" - ")[0]
 
-    with col1:
-        st.metric("Tổng SKU", len(fetch_products()))
-        st.metric("Tồn kho dòng", df_stock["quantity"].sum() if not df_stock.empty else 0)
+    wh_name = st.selectbox("Kho", df_wh["name"])
+    wh_id = int(df_wh[df_wh["name"] == wh_name]["id"].values[0])
 
-    with col2:
-        st.metric("Kho cửa hàng", df_store["quantity"].sum() if not df_store.empty else 0)
+    t = st.radio("Loại", ["Nhập", "Xuất"])
+    qty = st.number_input("Số lượng", min_value=1)
 
-    if not df_stock.empty:
-        st.bar_chart(df_stock.groupby("name")["quantity"].sum())
+    if st.button("Xác nhận"):
+        res = api("POST", "transaction", json={
+            "sku": sku,
+            "type": t,
+            "quantity": qty,
+            "warehouse_id": wh_id
+        })
+        st.success(res)
 
-# ====== KHO TỔNG ======
-elif menu == "Kho tổng":
-    st.subheader("📦 Tồn kho tổng")
-    st.dataframe(fetch_inventory(), use_container_width=True)
+# ====== TRANSFER ======
+elif menu == "Chuyển kho":
+    df_prod = fetch("products")
+    df_wh = fetch("warehouses")
 
-# ====== KHO CỬA HÀNG ======
-elif menu == "Kho cửa hàng":
-    st.subheader("🏬 Tồn kho cửa hàng")
-    st.dataframe(fetch_store_inventory(), use_container_width=True)
+    sku = st.selectbox("Sản phẩm", df_prod["sku"] + " - " + df_prod["name"]).split(" - ")[0]
 
-# ====== THÊM SẢN PHẨM ======
-elif menu == "Thêm sản phẩm":
-    st.subheader("➕ Thêm sản phẩm")
+    from_wh = st.selectbox("Từ kho", df_wh["name"])
+    to_wh = st.selectbox("Đến kho", df_wh["name"])
 
-    sku = st.text_input("SKU")
-    name = st.text_input("Tên sản phẩm")
+    qty = st.number_input("Số lượng", min_value=1)
 
-    if st.button("Thêm"):
-        res = api_request("POST", "products", json={"sku": sku, "name": name})
+    if st.button("Chuyển"):
+        res = api("POST", "transfer", json={
+            "sku": sku,
+            "from_warehouse_id": int(df_wh[df_wh["name"]==from_wh]["id"].values[0]),
+            "to_warehouse_id": int(df_wh[df_wh["name"]==to_wh]["id"].values[0]),
+            "quantity": qty
+        })
+        st.success(res)
 
-        if "msg" in res:
-            st.success(res["msg"])
-            st.cache_data.clear()
-        else:
-            st.error(res.get("error", "Lỗi"))
+# ====== SEARCH ======
+elif menu == "Tìm kiếm":
+    q = st.text_input("Tìm SKU / tên")
+    if q:
+        df = fetch(f"products/search?q={q}")
+        st.dataframe(df)
 
-# ====== SỬA / XÓA / PHỤC HỒI ======
-elif menu == "Sửa/Xóa/Phục hồi":
-    st.subheader("✏️ Quản lý sản phẩm")
-
-    df = fetch_products()
+# ====== LOW STOCK ======
+elif menu == "Cảnh báo tồn kho":
+    threshold = st.number_input("Ngưỡng", 1, 100, 10)
+    df = fetch(f"inventory/low-stock?threshold={threshold}")
 
     if df.empty:
-        st.warning("Không có sản phẩm")
+        st.success("OK")
     else:
-        for i, row in df.iterrows():
-            col1, col2, col3, col4 = st.columns([2,3,2,3])
+        st.dataframe(df)
 
-            with col1:
-                st.write(row["sku"])
+# ====== PDF ======
+elif menu == "In phiếu":
+    df_prod = fetch("products")
 
-            with col2:
-                st.write(row["name"])
+    sku = st.selectbox("Sản phẩm", df_prod["sku"] + " - " + df_prod["name"]).split(" - ")[0]
+    qty = st.number_input("Số lượng", min_value=1)
+    t = st.selectbox("Loại", ["Nhập", "Xuất"])
 
-            with col3:
-                st.write("🟢" if row["is_active"] else "🔴")
-
-            with col4:
-                if row["is_active"]:
-                    if st.button("🗑 Xóa", key=f"del_{i}"):
-                        res = api_request("DELETE", f"products/{row['sku']}")
-                        st.success(res.get("msg", "Đã xóa"))
-                        st.cache_data.clear()
-                        st.rerun()
-
-                    if st.button("✏️ Sửa", key=f"edit_{i}"):
-                        new_name = st.text_input("Tên mới", value=row["name"], key=f"name_{i}")
-
-                        if st.button("💾 Lưu", key=f"save_{i}"):
-                            res = api_request("PUT", f"products/{row['sku']}", json={"name": new_name})
-                            st.success(res.get("msg", "Đã cập nhật"))
-                            st.cache_data.clear()
-                            st.rerun()
-
-                else:
-                    if st.button("♻️ Phục hồi", key=f"rec_{i}"):
-                        res = api_request("POST", f"products/{row['sku']}/recover")
-                        st.success(res.get("msg", "Đã phục hồi"))
-                        st.cache_data.clear()
-                        st.rerun()
-
-            st.divider()
-
-# ====== NHẬP / XUẤT ======
-elif menu == "Nhập/Xuất":
-    st.subheader("📥📤 Giao dịch")
-
-    df_prod = fetch_products()
-    if df_prod.empty:
-        st.warning("Chưa có sản phẩm")
-    else:
-        sel = st.selectbox("Sản phẩm", df_prod["sku"] + " - " + df_prod["name"])
-        sku = sel.split(" - ")[0]
-
-        tx_type = st.radio("Loại", ["Nhập", "Xuất"])
-        qty = st.number_input("Số lượng", min_value=1)
-
-        if st.button("Xác nhận"):
-            res = api_request("POST", "transaction", json={
-                "sku": sku,
-                "type": tx_type,
-                "quantity": qty,
-                "warehouse_id": 1
-            })
-
-            if res.get("msg") == "OK":
-                st.success("Thành công")
-                st.cache_data.clear()
-            else:
-                st.error(res.get("error", "Lỗi"))
-
-# ====== LỊCH SỬ ======
-elif menu == "Lịch sử":
-    st.subheader("📜 Lịch sử")
-    df = fetch_history(200)
-    st.dataframe(df, use_container_width=True)
-
-# ====== XUẤT EXCEL ======
-elif menu == "Xuất Excel":
-    st.subheader("📥 Export")
-
-    df = fetch_history(1000)
-
-    if st.button("Tải Excel"):
-        file = "history.xlsx"
-        df.to_excel(file, index=False)
-
-        with open(file, "rb") as f:
-            st.download_button("Download", f, file_name="history.xlsx")
+    if st.button("Tạo PDF"):
+        url = f"{API_URL}/invoice/pdf?sku={sku}&qty={qty}&type={t}"
+        st.markdown(f"[Download PDF]({url})")

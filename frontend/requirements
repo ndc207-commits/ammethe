@@ -1,4 +1,6 @@
 streamlit
 pandas
+sqlalchemy
 requests
 openpyxl
+python-dotenv

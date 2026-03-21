@@ -113,39 +113,84 @@ elif menu=="Thêm sản phẩm":
 # ====== SỬA / XÓA / PHỤC HỒI ======
 elif menu=="Sửa/Xóa/Phục hồi":
     st.subheader("✏️ Sửa / 🗑 Xóa / ♻️ Phục hồi sản phẩm")
+
     df_active = fetch_products(active=True)
     df_deleted = fetch_products(active=False)
 
-    if not df_active.empty:
-        sel_active = st.selectbox("Chọn sản phẩm để sửa/xóa", df_active["sku"] + " - " + df_active["name"])
-        sku = sel_active.split(" - ")[0] if sel_active else None
-        new_name = st.text_input("Tên mới", df_active[df_active["sku"]==sku]["name"].values[0])
-        if st.button("Cập nhật tên"):
-            res = safe_post("products/update", {"sku":sku,"name":new_name})
-            if "msg" in res:
-                st.success(res["msg"])
-            else:
-                st.error("Cập nhật thất bại")
-            st.cache_data.clear()
-        if st.button("Xóa sản phẩm"):
-            res = safe_post("products/delete", {"sku":sku})
-            if "msg" in res:
-                st.success(res["msg"])
-            else:
-                st.error("Xóa thất bại")
-            st.cache_data.clear()
+    # ===== ACTIVE =====
+    st.markdown("### 🟢 Sản phẩm đang hoạt động")
 
-    if not df_deleted.empty:
-        sel_deleted = st.selectbox("Chọn sản phẩm phục hồi", df_deleted["sku"] + " - " + df_deleted["name"])
-        sku_recover = sel_deleted.split(" - ")[0] if sel_deleted else None
-        if st.button("Phục hồi sản phẩm"):
+    if df_active.empty:
+        st.info("Không có sản phẩm nào")
+    else:
+        sel_active = st.selectbox(
+            "Chọn sản phẩm",
+            df_active["sku"] + " - " + df_active["name"],
+            key="active_select"
+        )
+
+        sku = sel_active.split(" - ")[0]
+        current_name = df_active[df_active["sku"]==sku]["name"].values[0]
+
+        st.markdown(f"**SKU:** `{sku}`")
+        st.markdown(f"**Tên hiện tại:** {current_name}")
+
+        new_name = st.text_input("✏️ Tên mới", current_name)
+
+        col1, col2 = st.columns(2)
+
+        # ===== SỬA =====
+        with col1:
+            if st.button("💾 Cập nhật", use_container_width=True):
+                res = safe_post("products/update", {"sku":sku,"name":new_name})
+                if "msg" in res:
+                    st.success(res["msg"])
+                else:
+                    st.error("Cập nhật thất bại")
+                st.cache_data.clear()
+                st.rerun()
+
+        # ===== XÓA =====
+        with col2:
+            confirm = st.checkbox("Xác nhận xóa", key="confirm_delete")
+            if st.button("🗑 Xóa sản phẩm", use_container_width=True):
+                if not confirm:
+                    st.warning("Vui lòng tick xác nhận xóa")
+                else:
+                    res = safe_post("products/delete", {"sku":sku})
+                    if "msg" in res:
+                        st.success(res["msg"])
+                    else:
+                        st.error("Xóa thất bại")
+                    st.cache_data.clear()
+                    st.rerun()
+
+    st.divider()
+
+    # ===== DELETED =====
+    st.markdown("### 🔴 Sản phẩm đã xóa")
+
+    if df_deleted.empty:
+        st.info("Không có sản phẩm đã xóa")
+    else:
+        sel_deleted = st.selectbox(
+            "Chọn sản phẩm phục hồi",
+            df_deleted["sku"] + " - " + df_deleted["name"],
+            key="deleted_select"
+        )
+
+        sku_recover = sel_deleted.split(" - ")[0]
+
+        st.markdown(f"**SKU:** `{sku_recover}`")
+
+        if st.button("♻️ Phục hồi sản phẩm", use_container_width=True):
             res = safe_post("products/recover", {"sku":sku_recover})
             if "msg" in res:
                 st.success(res["msg"])
             else:
                 st.error("Phục hồi thất bại")
             st.cache_data.clear()
-
+            st.rerun()
 # ====== NHẬP / XUẤT ======
 elif menu=="Nhập/Xuất":
     st.subheader("📥 Nhập / 📤 Xuất kho")

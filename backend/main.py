@@ -1,211 +1,242 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
-from typing import Optional
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 import os
+import io
+from reportlab.pdfgen import canvas
+from datetime import datetime
 
-app = FastAPI(title="Quản Lý Kho AMME THE")
+app = FastAPI(title="Kho AMME THE")
 
-# ====== CORS ======
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ====== DB ======
 DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    raise Exception("Thiếu DATABASE_URL")
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True
-)
+# ====== CREATE TABLE ======
+def execute(q):
+    with engine.begin() as conn:
+        conn.execute(text(q))
 
-# ====== HELPERS ======
-def fetch_all(q, p={}):
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(text(q), p)
-            return [dict(row._mapping) for row in result]
-    except Exception as e:
-        print("FETCH_ALL ERROR:", e)
-        raise HTTPException(500, "Database error")
+execute("""
+CREATE TABLE IF NOT EXISTS products(
+    sku TEXT PRIMARY KEY,
+    name TEXT,
+    is_active BOOLEAN DEFAULT TRUE
+);
 
-def execute(q, p={}):
-    try:
-        with engine.begin() as conn:
-            conn.execute(text(q), p)
-    except Exception as e:
-        print("EXECUTE ERROR:", e)
-        raise HTTPException(500, "Database error")
+CREATE TABLE IF NOT EXISTS warehouses(
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS inventory(
+    sku TEXT,
+    warehouse_id INT,
+    quantity INT DEFAULT 0,
+    UNIQUE(sku, warehouse_id)
+);
+
+CREATE TABLE IF NOT EXISTS history(
+    id SERIAL PRIMARY KEY,
+    sku TEXT,
+    type TEXT,
+    quantity INT,
+    warehouse_id INT,
+    created_at TIMESTAMP DEFAULT now()
+);
+""")
+
+# ====== SEED WAREHOUSES ======
+with engine.begin() as conn:
+    conn.execute(text("""
+    INSERT INTO warehouses(name)
+    VALUES ('La Pagode'), ('Muse'), ('Metz Ville'), ('Nancy')
+    ON CONFLICT DO NOTHING;
+    """))
 
 # ====== MODELS ======
 class Product(BaseModel):
     sku: str
-    name: Optional[str] = None   # ✅ FIX
+    name: str
 
 class Transaction(BaseModel):
     sku: str
     type: str
     quantity: int
     warehouse_id: int
-    store_id: Optional[int] = None
 
-# ====== INIT DB ======
-def init_db():
-    queries = [
-        """CREATE TABLE IF NOT EXISTS products(
-            sku TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            is_active BOOLEAN DEFAULT TRUE
-        )""",
-        """CREATE TABLE IF NOT EXISTS inventory(
-            sku TEXT,
-            warehouse_id INTEGER,
-            quantity INTEGER DEFAULT 0,
-            UNIQUE(sku, warehouse_id)
-        )""",
-        """CREATE TABLE IF NOT EXISTS store_inventory(
-            sku TEXT,
-            store_id INTEGER,
-            quantity INTEGER DEFAULT 0,
-            UNIQUE(sku, store_id)
-        )""",
-        """CREATE TABLE IF NOT EXISTS history(
-            id SERIAL PRIMARY KEY,
-            sku TEXT,
-            type TEXT,
-            quantity INTEGER,
-            warehouse_id INTEGER,
-            store_id INTEGER,
-            created_at TIMESTAMP DEFAULT now()
-        )"""
-    ]
+class Transfer(BaseModel):
+    sku: str
+    from_warehouse_id: int
+    to_warehouse_id: int
+    quantity: int
 
-    for q in queries:
-        execute(q)
-
-init_db()
-
-# ====== ROOT ======
-@app.get("/")
-def root():
-    return {"status": "OK"}
+# ====== HELPERS ======
+def fetch_all(q, p={}):
+    with engine.connect() as conn:
+        res = conn.execute(text(q), p)
+        return [dict(r._mapping) for r in res]
 
 # ====== PRODUCTS ======
-
 @app.get("/products")
-def get_products(active: Optional[bool] = None):
-    if active is None:
-        return fetch_all("SELECT * FROM products ORDER BY sku")
+def get_products(active: bool = None):
+    q = "SELECT * FROM products"
+    if active is not None:
+        q += " WHERE is_active=:a"
+        return fetch_all(q, {"a": active})
+    return fetch_all(q)
 
-    return fetch_all(
-        "SELECT * FROM products WHERE is_active=:a ORDER BY sku",
-        {"a": active}
-    )
+@app.get("/products/search")
+def search(q: str):
+    return fetch_all("""
+    SELECT * FROM products
+    WHERE sku ILIKE :q OR name ILIKE :q
+    """, {"q": f"%{q}%"})
 
 @app.post("/products")
 def add_product(p: Product):
-    if not p.name:
-        raise HTTPException(400, "Thiếu tên sản phẩm")
-
-    execute(
-        """INSERT INTO products(sku,name)
-        VALUES (:sku,:name)
-        ON CONFLICT (sku) DO NOTHING""",
-        p.dict()
-    )
-    return {"msg": "Đã thêm"}
-
-@app.put("/products/{sku}")
-def update_product(sku: str, p: Product):
-    if not p.name:
-        raise HTTPException(400, "Tên không được rỗng")
-
-    execute(
-        "UPDATE products SET name=:name WHERE sku=:sku",
-        {"sku": sku, "name": p.name}
-    )
-    return {"msg": "Đã cập nhật"}
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO products(sku,name) VALUES(:sku,:name)
+        ON CONFLICT DO NOTHING
+        """), p.dict())
+    return {"msg": "OK"}
 
 @app.delete("/products/{sku}")
 def delete_product(sku: str):
-    execute(
-        "UPDATE products SET is_active=FALSE WHERE sku=:sku",
-        {"sku": sku}
-    )
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE products SET is_active=FALSE WHERE sku=:sku"), {"sku": sku})
     return {"msg": "Đã xóa"}
 
 @app.post("/products/{sku}/recover")
 def recover_product(sku: str):
-    execute(
-        "UPDATE products SET is_active=TRUE WHERE sku=:sku",
-        {"sku": sku}
-    )
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE products SET is_active=TRUE WHERE sku=:sku"), {"sku": sku})
     return {"msg": "Đã phục hồi"}
 
-# ====== INVENTORY ======
+@app.put("/products/{sku}")
+def update_product(sku: str, p: Product):
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE products SET name=:name WHERE sku=:sku"),
+                     {"sku": sku, "name": p.name})
+    return {"msg": "Đã cập nhật"}
 
+# ====== WAREHOUSES ======
+@app.get("/warehouses")
+def get_warehouses():
+    return fetch_all("SELECT * FROM warehouses ORDER BY id")
+
+# ====== INVENTORY ======
 @app.get("/inventory")
-def get_inventory():
+def inventory():
     return fetch_all("""
-    SELECT p.sku, p.name, COALESCE(SUM(i.quantity),0) AS quantity
+    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity,0) as quantity
     FROM products p
-    LEFT JOIN inventory i ON p.sku=i.sku
+    CROSS JOIN warehouses w
+    LEFT JOIN inventory i 
+        ON p.sku=i.sku AND i.warehouse_id=w.id
     WHERE p.is_active=TRUE
-    GROUP BY p.sku, p.name
-    ORDER BY p.sku
+    ORDER BY w.id, p.sku
     """)
 
 # ====== TRANSACTION ======
-
 @app.post("/transaction")
 def transaction(tx: Transaction):
     with engine.begin() as conn:
 
-        res = conn.execute(
-            text("SELECT quantity FROM inventory WHERE sku=:sku AND warehouse_id=:w"),
-            {"sku": tx.sku, "w": tx.warehouse_id}
-        ).fetchone()
+        res = conn.execute(text("""
+        SELECT quantity FROM inventory
+        WHERE sku=:sku AND warehouse_id=:w
+        """), {"sku": tx.sku, "w": tx.warehouse_id}).fetchone()
 
         cur = res[0] if res else 0
 
         if tx.type == "Xuất" and tx.quantity > cur:
             raise HTTPException(400, "Không đủ hàng")
 
-        new = cur + tx.quantity if tx.type == "Nhập" else cur - tx.quantity
+        new_qty = cur + tx.quantity if tx.type == "Nhập" else cur - tx.quantity
 
         if res:
-            conn.execute(
-                text("UPDATE inventory SET quantity=:q WHERE sku=:sku AND warehouse_id=:w"),
-                {"q": new, "sku": tx.sku, "w": tx.warehouse_id}
-            )
+            conn.execute(text("""
+            UPDATE inventory SET quantity=:q
+            WHERE sku=:sku AND warehouse_id=:w
+            """), {"q": new_qty, "sku": tx.sku, "w": tx.warehouse_id})
         else:
-            conn.execute(
-                text("INSERT INTO inventory VALUES (:sku,:w,:q)"),
-                {"sku": tx.sku, "w": tx.warehouse_id, "q": new}
-            )
+            conn.execute(text("""
+            INSERT INTO inventory(sku,warehouse_id,quantity)
+            VALUES(:sku,:w,:q)
+            """), {"sku": tx.sku, "w": tx.warehouse_id, "q": new_qty})
 
-        conn.execute(
-            text("""INSERT INTO history(sku,type,quantity,warehouse_id,store_id)
-                    VALUES (:sku,:type,:q,:w,:sid)"""),
-            {"sku": tx.sku, "type": tx.type, "q": tx.quantity,
-             "w": tx.warehouse_id, "sid": tx.store_id}
-        )
+        conn.execute(text("""
+        INSERT INTO history(sku,type,quantity,warehouse_id)
+        VALUES(:sku,:type,:q,:w)
+        """), {"sku": tx.sku, "type": tx.type, "q": tx.quantity, "w": tx.warehouse_id})
 
     return {"msg": "OK"}
 
-# ====== HISTORY ======
+# ====== TRANSFER ======
+@app.post("/transfer")
+def transfer(t: Transfer):
+    with engine.begin() as conn:
 
-@app.get("/history")
-def get_history(limit: int = 100):
+        res = conn.execute(text("""
+        SELECT quantity FROM inventory
+        WHERE sku=:sku AND warehouse_id=:w
+        """), {"sku": t.sku, "w": t.from_warehouse_id}).fetchone()
+
+        cur = res[0] if res else 0
+
+        if t.quantity > cur:
+            raise HTTPException(400, "Không đủ hàng")
+
+        # trừ kho nguồn
+        conn.execute(text("""
+        UPDATE inventory SET quantity=quantity-:q
+        WHERE sku=:sku AND warehouse_id=:w
+        """), {"q": t.quantity, "sku": t.sku, "w": t.from_warehouse_id})
+
+        # cộng kho đích
+        res2 = conn.execute(text("""
+        SELECT quantity FROM inventory
+        WHERE sku=:sku AND warehouse_id=:w
+        """), {"sku": t.sku, "w": t.to_warehouse_id}).fetchone()
+
+        if res2:
+            conn.execute(text("""
+            UPDATE inventory SET quantity=quantity+:q
+            WHERE sku=:sku AND warehouse_id=:w
+            """), {"q": t.quantity, "sku": t.sku, "w": t.to_warehouse_id})
+        else:
+            conn.execute(text("""
+            INSERT INTO inventory(sku,warehouse_id,quantity)
+            VALUES(:sku,:w,:q)
+            """), {"sku": t.sku, "w": t.to_warehouse_id, "q": t.quantity})
+
+    return {"msg": "OK"}
+
+# ====== LOW STOCK ======
+@app.get("/inventory/low-stock")
+def low_stock(threshold: int = 10):
     return fetch_all("""
-    SELECT * FROM history
-    ORDER BY created_at DESC
-    LIMIT :lim
-    """, {"lim": int(limit)})
+    SELECT w.name as warehouse, p.sku, p.name, i.quantity
+    FROM inventory i
+    JOIN products p ON p.sku=i.sku
+    JOIN warehouses w ON w.id=i.warehouse_id
+    WHERE i.quantity <= :t
+    """, {"t": threshold})
+
+# ====== PDF ======
+@app.get("/invoice/pdf")
+def pdf(sku: str, qty: int, type: str):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer)
+
+    c.drawString(100, 800, f"PHIẾU {type}")
+    c.drawString(100, 780, f"SKU: {sku}")
+    c.drawString(100, 760, f"Số lượng: {qty}")
+    c.drawString(100, 740, f"Ngày: {datetime.now()}")
+
+    c.save()
+    buffer.seek(0)
+
+    return StreamingResponse(buffer, media_type="application/pdf")

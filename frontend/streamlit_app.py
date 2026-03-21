@@ -10,22 +10,50 @@ import os
 API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
 
 # ====== CACHE DATA ======
+# ====== HÀM FETCH AN TOÀN ======
+def safe_fetch(endpoint: str, params: dict = None, timeout: int = 5):
+    """
+    Gọi API và trả về pd.DataFrame an toàn.
+    - Nếu API trả về JSON hợp lệ list/dict, chuyển sang DataFrame
+    - Nếu lỗi (timeout, connection, JSONDecodeError), trả về DataFrame rỗng
+    """
+    try:
+        response = requests.get(f"{API_URL}/{endpoint}", params=params or {}, timeout=timeout)
+        response.raise_for_status()
+        try:
+            data = response.json()
+            if not isinstance(data, (list, dict)):
+                # nếu API trả về string hoặc HTML
+                st.warning(f"API {endpoint} trả dữ liệu không chuẩn: {data}")
+                data = []
+        except ValueError:
+            st.warning(f"Không thể parse JSON từ {endpoint}: {response.text[:200]}")
+            data = []
+    except requests.exceptions.RequestException as e:
+        st.warning(f"Lỗi khi gọi API {endpoint}: {e}")
+        data = []
+    return pd.DataFrame(data)
+
+
+# ====== HÀM FETCH RIÊNG ======
 @st.cache_data(ttl=30)
 def fetch_products(active=True):
-    df = pd.DataFrame(requests.get(f"{API_URL}/products").json())
-    return df[df["is_active"]==active].copy()
+    df = safe_fetch("products")
+    if not df.empty and "is_active" in df.columns:
+        df = df[df["is_active"] == active].copy()
+    return df
 
 @st.cache_data(ttl=30)
 def fetch_inventory():
-    return pd.DataFrame(requests.get(f"{API_URL}/inventory").json())
+    return safe_fetch("inventory")
 
 @st.cache_data(ttl=30)
 def fetch_store_inventory():
-    return pd.DataFrame(requests.get(f"{API_URL}/store_inventory").json())
+    return safe_fetch("store_inventory")
 
 @st.cache_data(ttl=30)
 def fetch_history(limit=200):
-    return pd.DataFrame(requests.get(f"{API_URL}/history", params={"limit":limit}).json())
+    return safe_fetch("history", params={"limit": limit})
 
 # ====== UI ======
 st.title("📦 Quản lý kho AMME THE")

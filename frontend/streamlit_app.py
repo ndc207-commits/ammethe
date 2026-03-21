@@ -2,13 +2,12 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime
 import os
 
 # ====== CẤU HÌNH API ======
 API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
 
-# ====== HÀM FETCH AN TOÀN ======
+# ====== HÀM GET POST AN TOÀN ======
 def safe_fetch(endpoint: str, params: dict = None, timeout: int = 5):
     try:
         response = requests.get(f"{API_URL}/{endpoint}", params=params or {}, timeout=timeout)
@@ -26,7 +25,6 @@ def safe_fetch(endpoint: str, params: dict = None, timeout: int = 5):
         data = []
     return pd.DataFrame(data)
 
-# ====== HÀM POST AN TOÀN ======
 def safe_post(endpoint: str, payload: dict, timeout: int = 5):
     try:
         response = requests.post(f"{API_URL}/{endpoint}", json=payload, timeout=timeout)
@@ -45,7 +43,7 @@ def safe_post(endpoint: str, payload: dict, timeout: int = 5):
 def fetch_products(active=True):
     df = safe_fetch("products")
     if not df.empty and "is_active" in df.columns:
-        df = df[df["is_active"] == active].copy()
+        df = df[df["is_active"]==active].copy()
     return df
 
 @st.cache_data(ttl=30)
@@ -58,7 +56,14 @@ def fetch_store_inventory():
 
 @st.cache_data(ttl=30)
 def fetch_history(limit=200):
-    return safe_fetch("history", params={"limit": limit})
+    df = pd.DataFrame()
+    try:
+        df = safe_fetch("history", params={"limit": limit})
+        if df.empty:
+            st.info("Chưa có lịch sử giao dịch hoặc server trả dữ liệu rỗng.")
+    except Exception as e:
+        st.error(f"Lỗi khi lấy lịch sử: {e}")
+    return df
 
 # ====== UI ======
 st.title("📦 Quản lý kho AMME THE")
@@ -74,6 +79,7 @@ if menu=="Dashboard":
     df_stock = fetch_inventory()
     if not df_stock.empty:
         st.bar_chart(df_stock.groupby("name")["quantity"].sum())
+
     st.subheader("🏬 Kho cửa hàng")
     df_store = fetch_store_inventory()
     if not df_store.empty:
@@ -112,7 +118,7 @@ elif menu=="Sửa/Xóa/Phục hồi":
 
     if not df_active.empty:
         sel_active = st.selectbox("Chọn sản phẩm để sửa/xóa", df_active["sku"] + " - " + df_active["name"])
-        sku = sel_active.split(" - ")[0]
+        sku = sel_active.split(" - ")[0] if sel_active else None
         new_name = st.text_input("Tên mới", df_active[df_active["sku"]==sku]["name"].values[0])
         if st.button("Cập nhật tên"):
             res = safe_post("products/update", {"sku":sku,"name":new_name})
@@ -131,7 +137,7 @@ elif menu=="Sửa/Xóa/Phục hồi":
 
     if not df_deleted.empty:
         sel_deleted = st.selectbox("Chọn sản phẩm phục hồi", df_deleted["sku"] + " - " + df_deleted["name"])
-        sku_recover = sel_deleted.split(" - ")[0]
+        sku_recover = sel_deleted.split(" - ")[0] if sel_deleted else None
         if st.button("Phục hồi sản phẩm"):
             res = safe_post("products/recover", {"sku":sku_recover})
             if "msg" in res:
@@ -144,35 +150,50 @@ elif menu=="Sửa/Xóa/Phục hồi":
 elif menu=="Nhập/Xuất":
     st.subheader("📥 Nhập / 📤 Xuất kho")
     df_prod = fetch_products()
-    sku = st.selectbox("Chọn sản phẩm", df_prod["sku"] + " - " + df_prod["name"]).split(" - ")[0]
 
-    df_stock = fetch_inventory()
-    wh_list = df_stock["name"].unique() if not df_stock.empty else ["Kho 1"]
-    wh = st.selectbox("Chọn kho", wh_list)
+    if df_prod.empty:
+        st.warning("Chưa có sản phẩm nào. Vui lòng thêm sản phẩm trước.")
+    else:
+        sel_prod = st.selectbox("Chọn sản phẩm", df_prod["sku"] + " - " + df_prod["name"])
+        sku = sel_prod.split(" - ")[0] if sel_prod else None
 
-    tx_type = st.radio("Loại giao dịch", ["Nhập","Xuất"])
-    qty = st.number_input("Số lượng", min_value=1)
+        df_stock = fetch_inventory()
+        wh_list = df_stock["name"].unique() if not df_stock.empty else ["Kho 1"]
+        wh = st.selectbox("Chọn kho", wh_list)
 
-    store_id = None
-    if tx_type=="Xuất":
-        df_store = fetch_store_inventory()
-        store_list = df_store["store"].unique() if not df_store.empty else ["Cửa hàng 1"]
-        store_name = st.selectbox("Chọn cửa hàng nhận hàng", store_list)
-        store_id = df_store[df_store["store"]==store_name]["store"].index[0]
+        tx_type = st.radio("Loại giao dịch", ["Nhập","Xuất"])
+        qty = st.number_input("Số lượng", min_value=1)
 
-    if st.button("Xác nhận giao dịch"):
-        payload = {"sku":sku,"type":tx_type,"quantity":qty,"warehouse_id":1,"store_id":store_id}
-        res = safe_post("transaction", payload)
-        if res.get("msg") == "OK":
-            st.success("✅ Hoàn tất giao dịch")
-            st.cache_data.clear()
-        else:
-            st.error(f"Thất bại: {res.get('detail','Không rõ lỗi')}")
+        store_id = None
+        if tx_type=="Xuất":
+            df_store = fetch_store_inventory()
+            if df_store.empty:
+                st.info("Chưa có cửa hàng nào. Hàng xuất sẽ không gán cửa hàng.")
+                store_list = ["Chưa có cửa hàng"]
+            else:
+                store_list = df_store["store"].unique()
+            store_name = st.selectbox("Chọn cửa hàng nhận hàng", store_list)
+            if not df_store.empty and store_name in df_store["store"].values:
+                store_id = df_store[df_store["store"]==store_name].index[0]
+
+        if st.button("Xác nhận giao dịch"):
+            if not sku:
+                st.error("Chưa chọn sản phẩm")
+            elif tx_type=="Xuất" and qty <= 0:
+                st.error("Số lượng xuất phải lớn hơn 0")
+            else:
+                payload = {"sku":sku,"type":tx_type,"quantity":qty,"warehouse_id":1,"store_id":store_id}
+                res = safe_post("transaction", payload)
+                if res.get("msg") == "OK":
+                    st.success("✅ Hoàn tất giao dịch")
+                    st.cache_data.clear()
+                else:
+                    st.error(f"Thất bại: {res.get('detail','Không rõ lỗi')}")
 
 # ====== LỊCH SỬ ======
 elif menu=="Lịch sử":
     st.subheader("📜 Lịch sử giao dịch")
-    df_hist = fetch_history()
+    df_hist = fetch_history(limit=200)
     st.dataframe(df_hist, use_container_width=True)
 
 # ====== XUẤT EXCEL ======

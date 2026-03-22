@@ -1,263 +1,123 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
-from fastapi.responses import StreamingResponse
+from jose import JWTError, jwt
+from datetime import datetime, timedelta
+from typing import List
 import os
 import io
-from reportlab.pdfgen import canvas
-from datetime import datetime
+from fastapi.responses import StreamingResponse
+from passlib.context import CryptContext
+import pandas as pd
+import openpyxl
 
 app = FastAPI(title="Kho AMME THE")
 
-# Lấy DATABASE_URL từ môi trường
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    raise Exception("❌ DATABASE_URL chưa được cấu hình")
-
-# Tạo kết nối cơ sở dữ liệu
+# ========= DATABASE CONFIG =========
+DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
-# ====== INIT DB ======
-def exec_sql(q):
-    with engine.begin() as conn:
-        conn.execute(text(q))
+# ========= JWT CONFIG =========
+SECRET_KEY = "mysecretkey"  # Use environment variables in production!
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+class User(BaseModel):
+    username: str
+    password: str
+    is_admin: bool = False
+
+# ===== DATABASE TABLES =====
+# Add user table for authentication
 exec_sql("""
-CREATE TABLE IF NOT EXISTS products(
-    sku TEXT PRIMARY KEY,
-    name TEXT,
-    is_active BOOLEAN DEFAULT TRUE
-);
-
-CREATE TABLE IF NOT EXISTS warehouses(
-    id SERIAL PRIMARY KEY,
-    name TEXT UNIQUE
-);
-
-CREATE TABLE IF NOT EXISTS inventory(
-    sku TEXT,
-    warehouse_id INT,
-    quantity INT DEFAULT 0,
-    UNIQUE(sku, warehouse_id)
-);
-
-CREATE TABLE IF NOT EXISTS history(
-    id SERIAL PRIMARY KEY,
-    sku TEXT,
-    type TEXT,
-    quantity INT,
-    warehouse_id INT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY,
+    hashed_password TEXT,
+    is_admin BOOLEAN DEFAULT FALSE
 );
 """)
 
-# ====== SEED WAREHOUSES ======
-with engine.begin() as conn:
-    conn.execute(text("""
-    INSERT INTO warehouses(name)
-    VALUES ('La Pagode'), ('Muse'), ('Metz Ville'), ('Nancy')
-    ON CONFLICT DO NOTHING;
-    """))
+# ========= HELPER FUNCTIONS =========
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
 
-# ====== MODELS ======
-class Product(BaseModel):
-    sku: str
-    name: str
+def get_password_hash(password):
+    return pwd_context.hash(password)
 
-class Transaction(BaseModel):
-    sku: str
-    type: str
-    quantity: int
-    warehouse_id: int
+def create_access_token(data: dict, expires_delta: timedelta = timedelta(minutes=15)):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + expires_delta
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-class Transfer(BaseModel):
-    sku: str
-    from_warehouse_id: int
-    to_warehouse_id: int
-    quantity: int
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    return username
 
-# ====== HELPERS ======
-def fetch_all(q, p=None):
+# ========= API ROUTES =========
+
+# Register new user (admin can create users)
+@app.post("/register")
+def register(user: User):
+    hashed_password = get_password_hash(user.password)
+    with engine.begin() as conn:
+        conn.execute(text("""
+        INSERT INTO users (username, hashed_password, is_admin)
+        VALUES (:username, :hashed_password, :is_admin)
+        """), {"username": user.username, "hashed_password": hashed_password, "is_admin": user.is_admin})
+    return {"msg": "User registered successfully"}
+
+# Login and get token
+@app.post("/token")
+def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     with engine.connect() as conn:
-        res = conn.execute(text(q), p or {})
-        return [dict(r._mapping) for r in res]
+        result = conn.execute(text("SELECT * FROM users WHERE username=:username"), {"username": form_data.username}).fetchone()
+    
+    if result is None or not verify_password(form_data.password, result["hashed_password"]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(data={"sub": form_data.username}, expires_delta=access_token_expires)
+    return {"access_token": access_token, "token_type": "bearer"}
 
-# ====== PRODUCTS ======
+# Protect API with JWT (Example with /products)
 @app.get("/products")
-def get_products(active: bool = None):
-    q = "SELECT * FROM products"
-    if active is not None:
-        q += " WHERE is_active=:a"
-        return fetch_all(q, {"a": active})
-    return fetch_all(q)
+def get_products(token: str = Depends(oauth2_scheme)):
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT * FROM products")).fetchall()
+        return [{"sku": row[0], "name": row[1]} for row in result]
 
-@app.get("/products/search")
-def search(q: str):
-    return fetch_all("""
-    SELECT * FROM products
-    WHERE sku ILIKE :q OR name ILIKE :q
-    """, {"q": f"%{q}%"})
-
-@app.post("/products")
-def add_product(p: Product):
-    if not p.sku.strip() or not p.name.strip():
-        raise HTTPException(400, "Thiếu SKU hoặc tên sản phẩm")
-
-    with engine.begin() as conn:
-        # Kiểm tra nếu SKU đã tồn tại
-        existing = conn.execute(text("""
-        SELECT sku FROM products WHERE sku=:sku
-        """), {"sku": p.sku}).fetchone()
-
-        if existing:
-            raise HTTPException(400, "SKU đã tồn tại")
-
-        conn.execute(text("""
-        INSERT INTO products(sku,name)
-        VALUES(:sku,:name)
-        """), p.dict())
-    return {"msg": "Đã thêm sản phẩm"}
-
-@app.put("/products/{sku}")
-def update_product(sku: str, p: Product):
-    with engine.begin() as conn:
-        conn.execute(text("""
-        UPDATE products SET name=:name
-        WHERE sku=:sku
-        """), {"sku": sku, "name": p.name})
-    return {"msg": "OK"}
-
-@app.delete("/products/{sku}")
-def delete_product(sku: str):
-    with engine.begin() as conn:
-        conn.execute(text("""
-        UPDATE products SET is_active=FALSE
-        WHERE sku=:sku
-        """), {"sku": sku})
-    return {"msg": "Deleted"}
-
-@app.post("/products/{sku}/recover")
-def recover_product(sku: str):
-    with engine.begin() as conn:
-        conn.execute(text("""
-        UPDATE products SET is_active=TRUE
-        WHERE sku=:sku
-        """), {"sku": sku})
-    return {"msg": "Recovered"}
-
-# ====== WAREHOUSES ======
-@app.get("/warehouses")
-def get_warehouses():
-    return fetch_all("SELECT * FROM warehouses ORDER BY id")
-
-# ====== INVENTORY ======
+# ===== INVENTORY =====
 @app.get("/inventory")
-def inventory():
-    return fetch_all("""
-    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity,0) as quantity
-    FROM inventory i
-    JOIN products p ON p.sku = i.sku
-    JOIN warehouses w ON w.id = i.warehouse_id
-    WHERE p.is_active = TRUE
-    ORDER BY w.id, p.sku
-    """)
+def inventory(token: str = Depends(oauth2_scheme)):
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+        SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity,0) as quantity
+        FROM inventory i
+        JOIN products p ON p.sku = i.sku
+        JOIN warehouses w ON w.id = i.warehouse_id
+        WHERE p.is_active = TRUE
+        ORDER BY w.id, p.sku
+        """)).fetchall()
+        return [{"warehouse": row[0], "sku": row[1], "name": row[2], "quantity": row[3]} for row in result]
 
-@app.get("/inventory/warehouse/{warehouse_name}")
-def get_inventory_by_warehouse(warehouse_name: str):
-    return fetch_all("""
-    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity, 0) as quantity
-    FROM inventory i
-    JOIN products p ON p.sku = i.sku
-    JOIN warehouses w ON w.id = i.warehouse_id
-    WHERE w.name = :warehouse_name
-    """, {"warehouse_name": warehouse_name})
-
-# ====== TRANSACTION ======
-@app.post("/transaction")
-def transaction(tx: Transaction):
-    with engine.begin() as conn:
-        res = conn.execute(text("""
-        SELECT quantity FROM inventory
-        WHERE sku=:sku AND warehouse_id=:w
-        """), {"sku": tx.sku, "w": tx.warehouse_id}).fetchone()
-
-        cur = res[0] if res else 0
-
-        if tx.type == "Xuất" and tx.quantity > cur:
-            raise HTTPException(400, "Không đủ hàng")
-
-        new_qty = cur + tx.quantity if tx.type == "Nhập" else cur - tx.quantity
-
-        if res:
-            conn.execute(text("""
-            UPDATE inventory
-            SET quantity=:q
-            WHERE sku=:sku AND warehouse_id=:w
-            """), {"q": new_qty, "sku": tx.sku, "w": tx.warehouse_id})
-        else:
-            conn.execute(text("""
-            INSERT INTO inventory(sku,warehouse_id,quantity)
-            VALUES(:sku,:w,:q)
-            """), {"sku": tx.sku, "w": tx.warehouse_id, "q": new_qty})
-
-        conn.execute(text("""
-        INSERT INTO history(sku,type,quantity,warehouse_id)
-        VALUES(:sku,:type,:q,:w)
-        """), {"sku": tx.sku, "type": tx.type, "q": tx.quantity, "w": tx.warehouse_id})
-
-    return {"msg": "OK"}
-
-# ====== TRANSFER ======
-@app.post("/transfer")
-def transfer(t: Transfer):
-    with engine.begin() as conn:
-        res = conn.execute(text("""
-        SELECT quantity FROM inventory
-        WHERE sku=:sku AND warehouse_id=:w
-        """), {"sku": t.sku, "w": t.from_warehouse_id}).fetchone()
-
-        cur = res[0] if res else 0
-
-        if t.quantity > cur:
-            raise HTTPException(400, "Không đủ hàng")
-
-        conn.execute(text("""
-        UPDATE inventory
-        SET quantity = quantity - :q
-        WHERE sku=:sku AND warehouse_id=:w
-        """), {"q": t.quantity, "sku": t.sku, "w": t.from_warehouse_id})
-
-        res2 = conn.execute(text("""
-        SELECT quantity FROM inventory
-        WHERE sku=:sku AND warehouse_id=:w
-        """), {"sku": t.sku, "w": t.to_warehouse_id}).fetchone()
-
-        if res2:
-            conn.execute(text("""
-            UPDATE inventory
-            SET quantity = quantity + :q
-            WHERE sku=:sku AND warehouse_id=:w
-            """), {"q": t.quantity, "sku": t.sku, "w": t.to_warehouse_id})
-        else:
-            conn.execute(text("""
-            INSERT INTO inventory(sku, warehouse_id, quantity)
-            VALUES(:sku, :w, :q)
-            """), {"sku": t.sku, "w": t.to_warehouse_id, "q": t.quantity})
-
-    return {"msg": "OK"}
-
-# ====== LOW STOCK ======
-@app.get("/inventory/low-stock")
-def low_stock(threshold: int = 10):
-    return fetch_all("""
-    SELECT w.name as warehouse, p.sku, p.name, i.quantity
-    FROM inventory i
-    JOIN products p ON p.sku=i.sku
-    JOIN warehouses w ON w.id=i.warehouse_id
-    WHERE i.quantity <= :t
-    """, {"t": threshold})
-
-# ====== PDF ======
+# ===== PDF =====
 @app.get("/invoice/pdf")
 def pdf(sku: str, qty: int, type: str):
     buffer = io.BytesIO()
@@ -272,3 +132,23 @@ def pdf(sku: str, qty: int, type: str):
     buffer.seek(0)
 
     return StreamingResponse(buffer, media_type="application/pdf")
+
+# ===== EXPORT EXCEL =====
+@app.get("/export/excel")
+def export_excel(token: str = Depends(oauth2_scheme)):
+    df = fetch_all("""
+    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity,0) as quantity
+    FROM inventory i
+    JOIN products p ON p.sku = i.sku
+    JOIN warehouses w ON w.id = i.warehouse_id
+    WHERE p.is_active = TRUE
+    """)
+    
+    # Create Excel file
+    df_excel = pd.DataFrame(df)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_excel.to_excel(writer, index=False, sheet_name="Inventory")
+    output.seek(0)
+
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=inventory.xlsx"})

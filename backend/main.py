@@ -11,11 +11,14 @@ import io
 from reportlab.pdfgen import canvas
 import os
 
-app = FastAPI(title="Kho AMME THE")
+app = FastAPI(title="KHO AMME THE")
 
 # ===== Database =====
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+DATABASE_URL = os.getenv("DATABASE_URL")  # PostgreSQL Render
+if not DATABASE_URL:
+    raise Exception("Bạn cần set DATABASE_URL trên Render")
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 # ===== CORS =====
 app.add_middleware(
@@ -59,7 +62,7 @@ with engine.begin() as conn:
     """))
     conn.execute(text("""
     CREATE TABLE IF NOT EXISTS warehouses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         name TEXT
     );
     """))
@@ -73,12 +76,12 @@ with engine.begin() as conn:
     """))
     conn.execute(text("""
     CREATE TABLE IF NOT EXISTS history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         sku TEXT,
         type TEXT,
         quantity INTEGER,
         warehouse_id INTEGER,
-        created_at TEXT
+        created_at TIMESTAMP
     );
     """))
 
@@ -115,7 +118,7 @@ with engine.begin() as conn:
     admin = conn.execute(text("SELECT * FROM users WHERE username='admin'")).fetchone()
     if not admin:
         hashed = get_password_hash("admin1230")
-        conn.execute(text("INSERT INTO users (username, hashed_password, is_admin) VALUES ('admin', :h, 1)"), {"h": hashed})
+        conn.execute(text("INSERT INTO users (username, hashed_password, is_admin) VALUES ('admin', :h, TRUE)"), {"h": hashed})
 
 # ===== Routes =====
 @app.post("/register")
@@ -163,13 +166,13 @@ def update_product(sku:str, prod: dict, token: dict = Depends(get_current_user))
 @app.delete("/products/{sku}")
 def delete_product(sku:str, token: dict = Depends(get_current_user)):
     with engine.begin() as conn:
-        conn.execute(text("UPDATE products SET is_active=0 WHERE sku=:sku"), {"sku":sku})
+        conn.execute(text("UPDATE products SET is_active=FALSE WHERE sku=:sku"), {"sku":sku})
     return {"msg":"Deleted"}
 
 @app.post("/products/{sku}/recover")
 def recover_product(sku:str, token: dict = Depends(get_current_user)):
     with engine.begin() as conn:
-        conn.execute(text("UPDATE products SET is_active=1 WHERE sku=:sku"), {"sku":sku})
+        conn.execute(text("UPDATE products SET is_active=TRUE WHERE sku=:sku"), {"sku":sku})
     return {"msg":"Recovered"}
 
 # ===== Warehouses =====

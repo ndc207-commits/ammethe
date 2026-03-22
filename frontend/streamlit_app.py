@@ -45,11 +45,32 @@ else:
     token = get_token()
     menu = st.sidebar.radio("Menu", [
         "Kho tổng", "Nhập/Xuất", "Sản phẩm", "Thêm sản phẩm",
-        "Tìm kiếm", "Cảnh báo tồn kho", "Lịch sử", "PDF"
+        "Tìm kiếm", "Cảnh báo tồn kho", "Lịch sử", "PDF", "Thêm user mới"
     ])
 
+    # ====== Lấy thông tin user hiện tại ======
+    user_info = api("GET","users/me", token=token)
+    is_admin = user_info.get("is_admin", False) if user_info else False
+
+    # ====== Thêm user mới (chỉ admin) ======
+    if menu=="Thêm user mới":
+        if is_admin:
+            st.subheader("➕ Tạo user mới")
+            new_username = st.text_input("Tên user")
+            new_password = st.text_input("Mật khẩu", type="password")
+            is_admin_checkbox = st.checkbox("Admin", value=False)
+            if st.button("Tạo user"):
+                api("POST","register", token=token, json={
+                    "username": new_username,
+                    "password": new_password,
+                    "is_admin": is_admin_checkbox
+                })
+                st.success(f"User {new_username} đã tạo thành công!")
+        else:
+            st.warning("Chỉ admin mới có quyền tạo user mới")
+
     # ====== SẢN PHẨM ======
-    if menu == "Sản phẩm":
+    elif menu == "Sản phẩm":
         df = api("GET", "products", token=token)
         if not df:
             st.warning("Không có dữ liệu sản phẩm")

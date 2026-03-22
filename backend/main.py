@@ -1,6 +1,7 @@
 # backend/main.py
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi import Form
 from sqlalchemy import create_engine, text
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
@@ -80,15 +81,14 @@ CREATE TABLE IF NOT EXISTS history (
 );
 """)
 
-# ========= INIT ADMIN =========
-def init_admin():
-    admin = one("SELECT * FROM users WHERE username='admin'")
+# ===== Init admin =====
+with engine.begin() as conn:
+    admin = conn.execute(text("SELECT * FROM users WHERE username='admin'")).fetchone()
     if not admin:
-        exec_sql(
-            "INSERT INTO users(username, hashed_password, is_admin) VALUES (:u,:p,true)",
-            {"u":"admin", "p":pwd_context.hash("admin1230")}
-        )
-init_admin()
+        from passlib.context import CryptContext
+        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        hashed = pwd_context.hash("admin1230")
+        conn.execute(text("INSERT INTO users (username, hashed_password, is_admin) VALUES ('admin', :h, 1)"), {"h": hashed})
 
 # ========= UTILS =========
 def verify_password(plain_password, hashed_password):
@@ -129,11 +129,12 @@ class User(BaseModel):
 
 # ========= AUTH =========
 @app.post("/token")
-def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = one("SELECT * FROM users WHERE username=:u", {"u":form_data.username})
-    if not user or not verify_password(form_data.password, user["hashed_password"]):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    access_token = create_access_token({"sub":user["username"]})
+def login(username: str = Form(...), password: str = Form(...)):
+    with engine.connect() as conn:
+        user = conn.execute(text("SELECT * FROM users WHERE username=:u"), {"u": username}).fetchone()
+        if not user or not verify_password(password, user["hashed_password"]):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+    access_token = create_access_token({"sub": username})
     return {"access_token": access_token, "token_type":"bearer"}
 
 # ========= REGISTER (CHỈ ADMIN) =========

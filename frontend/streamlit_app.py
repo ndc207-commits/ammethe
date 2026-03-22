@@ -1,269 +1,167 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import create_engine, text
-from fastapi.responses import StreamingResponse
+import streamlit as st
+import pandas as pd
+import requests
 import os
-import io
-from reportlab.pdfgen import canvas
-from datetime import datetime
+import time
 
-app = FastAPI(title="Kho AMME THE")
+API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+def api(method, endpoint, **kwargs):
+    try:
+        r = requests.request(method, f"{API_URL}/{endpoint}", **kwargs)
+        if r.status_code == 200:
+            return r.json()
+        return []
+    except:
+        return []
 
-# ====== INIT DB ======
-def exec_sql(q):
-    with engine.begin() as conn:
-        conn.execute(text(q))
+@st.cache_data(ttl=30)
+def fetch(ep):
+    r = api("GET", ep)
+    return pd.DataFrame(r) if isinstance(r, list) else pd.DataFrame()
 
-exec_sql("""
-CREATE TABLE IF NOT EXISTS products(
-    sku TEXT PRIMARY KEY,
-    name TEXT,
-    is_active BOOLEAN DEFAULT TRUE
-);
+st.title("📦 QUẢN LÝ KHO")
 
-CREATE TABLE IF NOT EXISTS warehouses(
-    id SERIAL PRIMARY KEY,
-    name TEXT UNIQUE
-);
+menu = st.sidebar.radio("Menu", [
+    "Kho tổng",
+    "Nhập/Xuất",
+    "Chuyển kho",
+    "Sản phẩm",
+    "Thêm sản phẩm",
+    "Tìm kiếm",
+    "Cảnh báo tồn kho",
+    "Lịch sử",
+    "PDF"
+])
 
-CREATE TABLE IF NOT EXISTS inventory(
-    sku TEXT,
-    warehouse_id INT,
-    quantity INT DEFAULT 0,
-    UNIQUE(sku, warehouse_id)
-);
+WAREHOUSE_LIST = ["La Pagode", "Muse", "Metz Ville", "Nancy"]
 
-CREATE TABLE IF NOT EXISTS history(
-    id SERIAL PRIMARY KEY,
-    sku TEXT,
-    type TEXT,
-    quantity INT,
-    warehouse_id INT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-""")
+# ===== KHO =====
+if menu == "Kho tổng":
+    df = fetch("inventory")
 
-# ====== SEED WAREHOUSES ======
-with engine.begin() as conn:
-    conn.execute(text("""
-    INSERT INTO warehouses(name)
-    VALUES ('La Pagode'), ('Muse'), ('Metz Ville'), ('Nancy')
-    ON CONFLICT DO NOTHING;
-    """))
+    tabs = st.tabs(WAREHOUSE_LIST)
 
-# ====== MODELS ======
-class Product(BaseModel):
-    sku: str
-    name: str
+    col_name = None
+    if not df.empty:
+        col_name = "warehouse" if "warehouse" in df.columns else None
 
-class Transaction(BaseModel):
-    sku: str
-    type: str
-    quantity: int
-    warehouse_id: int
+    for i, wh in enumerate(WAREHOUSE_LIST):
+        with tabs[i]:
+            st.subheader(f"Kho: {wh}")
+            if df.empty or col_name is None:
+                st.warning("Không có dữ liệu")
+            else:
+                st.dataframe(df[df[col_name] == wh], use_container_width=True)
 
-class Transfer(BaseModel):
-    sku: str
-    from_warehouse_id: int
-    to_warehouse_id: int
-    quantity: int
+# ===== NHẬP XUẤT =====
+elif menu == "Nhập/Xuất":
+    df_prod = fetch("products")
+    df_wh = fetch("warehouses")
 
-# ====== HELPERS ======
-def fetch_all(q, p=None):
-    with engine.connect() as conn:
-        res = conn.execute(text(q), p or {})
-        return [dict(r._mapping) for r in res]
+    if "is_active" in df_prod.columns:
+        df_prod = df_prod[df_prod["is_active"] == True]
 
-# ====== PRODUCTS ======
-@app.get("/products")
-def get_products(active: bool = None):
-    q = "SELECT * FROM products"
-    if active is not None:
-        q += " WHERE is_active=:a"
-        return fetch_all(q, {"a": active})
-    return fetch_all(q)
+    if df_prod.empty or df_wh.empty:
+        st.warning("Không có dữ liệu")
+    else:
+        options = df_prod["sku"] + " - " + df_prod["name"]
 
-@app.get("/products/search")
-def search(q: str):
-    return fetch_all("""
-    SELECT * FROM products
-    WHERE sku ILIKE :q OR name ILIKE :q
-    """, {"q": f"%{q}%"})
+        selected = st.selectbox("Sản phẩm", options)
 
-@app.post("/products")
-def add_product(p: Product):
-    if not p.sku.strip() or not p.name.strip():
-        raise HTTPException(400, "Thiếu SKU hoặc tên sản phẩm")
+        if selected:
+            sku = selected.split(" - ")[0]
 
-    with engine.begin() as conn:
-        # Kiểm tra nếu SKU đã tồn tại
-        existing = conn.execute(text("""
-        SELECT sku FROM products WHERE sku=:sku
-        """), {"sku": p.sku}).fetchone()
+            wh = st.selectbox("Kho", df_wh["name"])
+            wh_id = int(df_wh[df_wh["name"] == wh]["id"].values[0])
 
-        if existing:
-            raise HTTPException(400, "SKU đã tồn tại")
+            t = st.radio("Loại", ["Nhập", "Xuất"])
+            qty = st.number_input("Số lượng", 1)
 
-        conn.execute(text("""
-        INSERT INTO products(sku,name)
-        VALUES(:sku,:name)
-        """), p.dict())
-    return {"msg": "Đã thêm sản phẩm"}
+            if st.button("OK"):
+                api("POST", "transaction", json={
+                    "sku": sku,
+                    "type": t,
+                    "quantity": qty,
+                    "warehouse_id": wh_id
+                })
+                st.success("OK")
+                st.cache_data.clear()
+                st.rerun()
 
-@app.put("/products/{sku}")
-def update_product(sku: str, p: Product):
-    with engine.begin() as conn:
-        conn.execute(text("""
-        UPDATE products SET name=:name
-        WHERE sku=:sku
-        """), {"sku": sku, "name": p.name})
-    return {"msg": "OK"}
+# ===== CHUYỂN KHO =====
+elif menu == "Chuyển kho":
+    df_prod = fetch("products")
+    df_wh = fetch("warehouses")
 
-@app.delete("/products/{sku}")
-def delete_product(sku: str):
-    with engine.begin() as conn:
-        conn.execute(text("""
-        UPDATE products SET is_active=FALSE
-        WHERE sku=:sku
-        """), {"sku": sku})
-    return {"msg": "Deleted"}
+    if "is_active" in df_prod.columns:
+        df_prod = df_prod[df_prod["is_active"] == True]
 
-@app.post("/products/{sku}/recover")
-def recover_product(sku: str):
-    with engine.begin() as conn:
-        conn.execute(text("""
-        UPDATE products SET is_active=TRUE
-        WHERE sku=:sku
-        """), {"sku": sku})
-    return {"msg": "Recovered"}
+    if df_prod.empty or df_wh.empty:
+        st.warning("Không có dữ liệu")
+    else:
+        options = df_prod["sku"] + " - " + df_prod["name"]
+        selected = st.selectbox("Sản phẩm", options)
 
-# ====== WAREHOUSES ======
-@app.get("/warehouses")
-def get_warehouses():
-    return fetch_all("SELECT * FROM warehouses ORDER BY id")
+        if selected:
+            sku = selected.split(" - ")[0]
 
-# ====== INVENTORY ======
-@app.get("/inventory")
-def inventory():
-    return fetch_all("""
-    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity, 0) as quantity
-    FROM inventory i
-    JOIN products p ON p.sku = i.sku
-    JOIN warehouses w ON w.id = i.warehouse_id
-    WHERE p.is_active = TRUE
-    ORDER BY w.id, p.sku
-    """)
+            from_wh = st.selectbox("Từ kho", df_wh["name"])
+            to_wh = st.selectbox("Đến kho", df_wh["name"])
 
-@app.get("/inventory/warehouse/{warehouse_name}")
-def get_inventory_by_warehouse(warehouse_name: str):
-    return fetch_all("""
-    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity, 0) as quantity
-    FROM inventory i
-    JOIN products p ON p.sku = i.sku
-    JOIN warehouses w ON w.id = i.warehouse_id
-    WHERE w.name = :warehouse_name
-    """, {"warehouse_name": warehouse_name})
+            qty = st.number_input("Số lượng", 1)
 
-# ====== TRANSACTION ======
-@app.post("/transaction")
-def transaction(tx: Transaction):
-    with engine.begin() as conn:
-        res = conn.execute(text("""
-        SELECT quantity FROM inventory
-        WHERE sku=:sku AND warehouse_id=:w
-        """), {"sku": tx.sku, "w": tx.warehouse_id}).fetchone()
+            if st.button("Chuyển"):
+                res = api("POST", "transfer", json={
+                    "sku": sku,
+                    "from_warehouse_id": int(df_wh[df_wh["name"] == from_wh]["id"].values[0]),
+                    "to_warehouse_id": int(df_wh[df_wh["name"] == to_wh]["id"].values[0]),
+                    "quantity": qty
+                })
+                st.success("OK")
+                st.cache_data.clear()
+                st.rerun()
 
-        cur = res[0] if res else 0
+# ===== THÊM SẢN PHẨM =====
+elif menu == "Thêm sản phẩm":
+    st.subheader("➕ Thêm sản phẩm mới")
 
-        if tx.type == "Xuất" and tx.quantity > cur:
-            raise HTTPException(400, "Không đủ hàng")
+    sku = st.text_input("SKU")
+    name = st.text_input("Tên sản phẩm")
 
-        new_qty = cur + tx.quantity if tx.type == "Nhập" else cur - tx.quantity
-
-        if res:
-            conn.execute(text("""
-            UPDATE inventory
-            SET quantity=:q
-            WHERE sku=:sku AND warehouse_id=:w
-            """), {"q": new_qty, "sku": tx.sku, "w": tx.warehouse_id})
+    if st.button("Thêm"):
+        if not sku or not name:
+            st.warning("⚠️ Nhập đầy đủ thông tin")
         else:
-            conn.execute(text("""
-            INSERT INTO inventory(sku,warehouse_id,quantity)
-            VALUES(:sku,:w,:q)
-            """), {"sku": tx.sku, "w": tx.warehouse_id, "q": new_qty})
+            res = requests.post(f"{API_URL}/products", json={
+                "sku": sku,
+                "name": name
+            })
 
-        conn.execute(text("""
-        INSERT INTO history(sku,type,quantity,warehouse_id)
-        VALUES(:sku,:type,:q,:w)
-        """), {"sku": tx.sku, "type": tx.type, "q": tx.quantity, "w": tx.warehouse_id})
+            if res.status_code == 200:
+                st.success("✅ Thêm thành công")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"Lỗi: {res.text}")
 
-    return {"msg": "OK"}
+# ===== PDF =====
+elif menu == "PDF":
+    df_prod = fetch("products")
 
-# ====== TRANSFER ======
-@app.post("/transfer")
-def transfer(t: Transfer):
-    with engine.begin() as conn:
-        res = conn.execute(text("""
-        SELECT quantity FROM inventory
-        WHERE sku=:sku AND warehouse_id=:w
-        """), {"sku": t.sku, "w": t.from_warehouse_id}).fetchone()
+    if "is_active" in df_prod.columns:
+        df_prod = df_prod[df_prod["is_active"] == True]
 
-        cur = res[0] if res else 0
+    if not df_prod.empty:
+        options = df_prod["sku"] + " - " + df_prod["name"]
+        selected = st.selectbox("Sản phẩm", options)
 
-        if t.quantity > cur:
-            raise HTTPException(400, "Không đủ hàng")
+        if selected:
+            sku = selected.split(" - ")[0]
 
-        conn.execute(text("""
-        UPDATE inventory
-        SET quantity = quantity - :q
-        WHERE sku=:sku AND warehouse_id=:w
-        """), {"q": t.quantity, "sku": t.sku, "w": t.from_warehouse_id})
+            qty = st.number_input("Qty", 1)
+            t = st.selectbox("Type", ["Nhập", "Xuất"])
 
-        res2 = conn.execute(text("""
-        SELECT quantity FROM inventory
-        WHERE sku=:sku AND warehouse_id=:w
-        """), {"sku": t.sku, "w": t.to_warehouse_id}).fetchone()
-
-        if res2:
-            conn.execute(text("""
-            UPDATE inventory
-            SET quantity = quantity + :q
-            WHERE sku=:sku AND warehouse_id=:w
-            """), {"q": t.quantity, "sku": t.sku, "w": t.to_warehouse_id})
-        else:
-            conn.execute(text("""
-            INSERT INTO inventory(sku,warehouse_id,quantity)
-            VALUES(:sku,:w,:q)
-            """), {"sku": t.sku, "w": t.to_warehouse_id, "q": t.quantity})
-
-    return {"msg": "OK"}
-
-# ====== LOW STOCK ======
-@app.get("/inventory/low-stock")
-def low_stock(threshold: int = 10):
-    return fetch_all("""
-    SELECT w.name as warehouse, p.sku, p.name, i.quantity
-    FROM inventory i
-    JOIN products p ON p.sku=i.sku
-    JOIN warehouses w ON w.id=i.warehouse_id
-    WHERE i.quantity <= :t
-    """, {"t": threshold})
-
-# ====== PDF ======
-@app.get("/invoice/pdf")
-def pdf(sku: str, qty: int, type: str):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer)
-
-    c.drawString(100, 800, f"PHIẾU {type}")
-    c.drawString(100, 780, f"SKU: {sku}")
-    c.drawString(100, 760, f"Số lượng: {qty}")
-    c.drawString(100, 740, f"Ngày: {datetime.now()}")
-
-    c.save()
-    buffer.seek(0)
-
-    return StreamingResponse(buffer, media_type="application/pdf")
+            if st.button("Download"):
+                url = f"{API_URL}/invoice/pdf?sku={sku}&qty={qty}&type={t}"
+                st.markdown(f"[Download PDF]({url})")

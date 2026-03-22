@@ -9,7 +9,12 @@ from datetime import datetime
 
 app = FastAPI(title="Kho AMME THE")
 
+# Lấy DATABASE_URL từ môi trường
 DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise Exception("❌ DATABASE_URL chưa được cấu hình")
+
+# Tạo kết nối cơ sở dữ liệu
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 # ====== INIT DB ======
@@ -149,7 +154,7 @@ def get_warehouses():
 @app.get("/inventory")
 def inventory():
     return fetch_all("""
-    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity, 0) as quantity
+    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity,0) as quantity
     FROM inventory i
     JOIN products p ON p.sku = i.sku
     JOIN warehouses w ON w.id = i.warehouse_id
@@ -235,8 +240,8 @@ def transfer(t: Transfer):
             """), {"q": t.quantity, "sku": t.sku, "w": t.to_warehouse_id})
         else:
             conn.execute(text("""
-            INSERT INTO inventory(sku,warehouse_id,quantity)
-            VALUES(:sku,:w,:q)
+            INSERT INTO inventory(sku, warehouse_id, quantity)
+            VALUES(:sku, :w, :q)
             """), {"sku": t.sku, "w": t.to_warehouse_id, "q": t.quantity})
 
     return {"msg": "OK"}

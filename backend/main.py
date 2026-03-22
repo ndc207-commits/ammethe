@@ -95,13 +95,23 @@ def search(q: str):
 
 @app.post("/products")
 def add_product(p: Product):
+    if not p.sku.strip() or not p.name.strip():
+        raise HTTPException(400, "Thiếu SKU hoặc tên sản phẩm")
+
     with engine.begin() as conn:
+        # Kiểm tra nếu SKU đã tồn tại
+        existing = conn.execute(text("""
+        SELECT sku FROM products WHERE sku=:sku
+        """), {"sku": p.sku}).fetchone()
+
+        if existing:
+            raise HTTPException(400, "SKU đã tồn tại")
+
         conn.execute(text("""
         INSERT INTO products(sku,name)
         VALUES(:sku,:name)
-        ON CONFLICT DO NOTHING
         """), p.dict())
-    return {"msg": "OK"}
+    return {"msg": "Đã thêm sản phẩm"}
 
 @app.put("/products/{sku}")
 def update_product(sku: str, p: Product):
@@ -139,20 +149,28 @@ def get_warehouses():
 @app.get("/inventory")
 def inventory():
     return fetch_all("""
-    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity,0) as quantity
-    FROM products p
-    CROSS JOIN warehouses w
-    LEFT JOIN inventory i 
-        ON p.sku=i.sku AND i.warehouse_id=w.id
-    WHERE p.is_active=TRUE
+    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity, 0) as quantity
+    FROM inventory i
+    JOIN products p ON p.sku = i.sku
+    JOIN warehouses w ON w.id = i.warehouse_id
+    WHERE p.is_active = TRUE
     ORDER BY w.id, p.sku
     """)
+
+@app.get("/inventory/warehouse/{warehouse_name}")
+def get_inventory_by_warehouse(warehouse_name: str):
+    return fetch_all("""
+    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity, 0) as quantity
+    FROM inventory i
+    JOIN products p ON p.sku = i.sku
+    JOIN warehouses w ON w.id = i.warehouse_id
+    WHERE w.name = :warehouse_name
+    """, {"warehouse_name": warehouse_name})
 
 # ====== TRANSACTION ======
 @app.post("/transaction")
 def transaction(tx: Transaction):
     with engine.begin() as conn:
-
         res = conn.execute(text("""
         SELECT quantity FROM inventory
         WHERE sku=:sku AND warehouse_id=:w
@@ -188,7 +206,6 @@ def transaction(tx: Transaction):
 @app.post("/transfer")
 def transfer(t: Transfer):
     with engine.begin() as conn:
-
         res = conn.execute(text("""
         SELECT quantity FROM inventory
         WHERE sku=:sku AND warehouse_id=:w

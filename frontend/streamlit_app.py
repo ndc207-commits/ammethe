@@ -4,8 +4,10 @@ import requests
 import os
 import time
 
+# API URL từ môi trường
 API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
 
+# Hàm gọi API
 def api(method, endpoint, **kwargs):
     try:
         r = requests.request(method, f"{API_URL}/{endpoint}", **kwargs)
@@ -20,7 +22,7 @@ def fetch(ep):
     r = api("GET", ep)
     return pd.DataFrame(r) if isinstance(r, list) else pd.DataFrame()
 
-st.title("📦 QUẢN LÝ KHO")
+st.title("📦 QUẢN LÝ KHO AMME THE")
 
 menu = st.sidebar.radio("Menu", [
     "Kho tổng",
@@ -144,6 +146,75 @@ elif menu == "Thêm sản phẩm":
                 st.rerun()
             else:
                 st.error(f"Lỗi: {res.text}")
+
+# ===== SẢN PHẨM =====
+elif menu == "Sản phẩm":
+    df = fetch("products")
+
+    if df.empty:
+        st.warning("Không có sản phẩm nào")
+    else:
+        active = df[df["is_active"] == True]
+        deleted = df[df["is_active"] == False]
+
+        # Hiển thị sản phẩm đang hoạt động
+        st.subheader("🟢 Sản phẩm đang hoạt động")
+        st.dataframe(active, use_container_width=True)
+
+        # Hiển thị sản phẩm đã xóa
+        st.subheader("🔴 Sản phẩm đã xóa")
+        if not deleted.empty:
+            sel = st.selectbox(
+                "Chọn sản phẩm phục hồi",
+                deleted["sku"] + " - " + deleted["name"]
+            )
+
+            sku = sel.split(" - ")[0]
+
+            if st.button("♻️ Phục hồi"):
+                requests.post(f"{API_URL}/products/{sku}/recover")
+                st.success("Đã phục hồi")
+                st.cache_data.clear()
+                st.rerun()
+
+        st.divider()
+
+        st.subheader("✏️ Sửa / 🗑 Xóa")
+
+        if not active.empty:
+            sel = st.selectbox(
+                "Chọn sản phẩm",
+                active["sku"] + " - " + active["name"]
+            )
+
+            sku = sel.split(" - ")[0]
+            current_name = active[active["sku"] == sku]["name"].values[0]
+
+            new_name = st.text_input("Tên mới", current_name)
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                if st.button("💾 Cập nhật"):
+                    requests.put(
+                        f"{API_URL}/products/{sku}",
+                        json={"sku": sku, "name": new_name}
+                    )
+                    st.success("Đã cập nhật")
+                    st.cache_data.clear()
+                    st.rerun()
+
+            with col2:
+                confirm = st.checkbox("Xác nhận xóa")
+
+                if st.button("🗑 Xóa"):
+                    if not confirm:
+                        st.warning("Cần xác nhận trước khi xóa")
+                    else:
+                        requests.delete(f"{API_URL}/products/{sku}")
+                        st.success("Đã xóa")
+                        st.cache_data.clear()
+                        st.rerun()
 
 # ===== PDF =====
 elif menu == "PDF":

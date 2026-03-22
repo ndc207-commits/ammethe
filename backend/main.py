@@ -5,20 +5,20 @@ from sqlalchemy import create_engine, text
 from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 import io
 from reportlab.pdfgen import canvas
 import os
 
 app = FastAPI(title="KHO AMME THE")
 
-# ===== Database =====
-DATABASE_URL = os.getenv("DATABASE_URL")  # PostgreSQL Render
+# ===== DATABASE =====
+DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise Exception("Bạn cần set DATABASE_URL trên Render")
+    raise Exception("Bạn cần set DATABASE_URL từ Supabase")
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL, connect_args={"sslmode": "require"}, pool_pre_ping=True)
 
 # ===== CORS =====
 app.add_middleware(
@@ -44,48 +44,7 @@ class User(BaseModel):
     password: str
     is_admin: bool = False
 
-# ===== Create tables =====
-with engine.begin() as conn:
-    conn.execute(text("""
-    CREATE TABLE IF NOT EXISTS users (
-        username TEXT PRIMARY KEY,
-        hashed_password TEXT,
-        is_admin BOOLEAN DEFAULT FALSE
-    );
-    """))
-    conn.execute(text("""
-    CREATE TABLE IF NOT EXISTS products (
-        sku TEXT PRIMARY KEY,
-        name TEXT,
-        is_active BOOLEAN DEFAULT TRUE
-    );
-    """))
-    conn.execute(text("""
-    CREATE TABLE IF NOT EXISTS warehouses (
-        id SERIAL PRIMARY KEY,
-        name TEXT
-    );
-    """))
-    conn.execute(text("""
-    CREATE TABLE IF NOT EXISTS inventory (
-        sku TEXT,
-        warehouse_id INTEGER,
-        quantity INTEGER DEFAULT 0,
-        PRIMARY KEY(sku, warehouse_id)
-    );
-    """))
-    conn.execute(text("""
-    CREATE TABLE IF NOT EXISTS history (
-        id SERIAL PRIMARY KEY,
-        sku TEXT,
-        type TEXT,
-        quantity INTEGER,
-        warehouse_id INTEGER,
-        created_at TIMESTAMP
-    );
-    """))
-
-# ===== Helper =====
+# ===== Helper functions =====
 def verify_password(plain, hashed):
     return pwd_context.verify(plain, hashed)
 
@@ -109,7 +68,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
             user = conn.execute(text("SELECT * FROM users WHERE username=:username"), {"username": username}).fetchone()
             if not user:
                 raise credentials_exception
-        return {"username": username, "is_admin": user["is_admin"]}
+        return {"username": username, "is_admin": user["role"]=="admin"}
     except JWTError:
         raise credentials_exception
 
@@ -118,7 +77,7 @@ with engine.begin() as conn:
     admin = conn.execute(text("SELECT * FROM users WHERE username='admin'")).fetchone()
     if not admin:
         hashed = get_password_hash("admin1230")
-        conn.execute(text("INSERT INTO users (username, hashed_password, is_admin) VALUES ('admin', :h, TRUE)"), {"h": hashed})
+        conn.execute(text("INSERT INTO users(username,password,role) VALUES ('admin', :p, 'admin')"), {"p": hashed})
 
 # ===== Routes =====
 @app.post("/register")
@@ -127,15 +86,15 @@ def register(user: User, current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Only admin can create users")
     hashed = get_password_hash(user.password)
     with engine.begin() as conn:
-        conn.execute(text("INSERT INTO users (username, hashed_password, is_admin) VALUES (:u,:p,:a)"),
-                     {"u": user.username, "p": hashed, "a": user.is_admin})
-    return {"msg": "User created"}
+        conn.execute(text("INSERT INTO users(username,password,role) VALUES (:u,:p,:r)"),
+                     {"u": user.username, "p": hashed, "r": "admin" if user.is_admin else "staff"})
+    return {"msg":"User created"}
 
 @app.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
     with engine.connect() as conn:
         user = conn.execute(text("SELECT * FROM users WHERE username=:u"), {"u": form_data.username}).fetchone()
-        if not user or not verify_password(form_data.password, user["hashed_password"]):
+        if not user or not verify_password(form_data.password, user["password"]):
             raise HTTPException(status_code=401, detail="Invalid credentials")
     access_token = create_access_token({"sub": form_data.username})
     return {"access_token": access_token, "token_type":"bearer"}
@@ -144,17 +103,17 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
 def me(current_user: dict = Depends(get_current_user)):
     return current_user
 
-# ===== Products =====
+# ===== Products CRUD =====
 @app.get("/products")
 def get_products(token: dict = Depends(get_current_user)):
     with engine.connect() as conn:
-        res = conn.execute(text("SELECT * FROM products")).fetchall()
+        res = conn.execute(text("SELECT sku,name,is_active FROM products")).fetchall()
         return [{"sku": r[0], "name": r[1], "is_active": r[2]} for r in res]
 
 @app.post("/products")
 def create_product(prod: dict, token: dict = Depends(get_current_user)):
     with engine.begin() as conn:
-        conn.execute(text("INSERT INTO products (sku,name) VALUES (:sku,:name)"), {"sku":prod["sku"], "name":prod["name"]})
+        conn.execute(text("INSERT INTO products(sku,name) VALUES (:sku,:name)"), {"sku":prod["sku"], "name":prod["name"]})
     return {"msg":"Created"}
 
 @app.put("/products/{sku}")
@@ -175,13 +134,7 @@ def recover_product(sku:str, token: dict = Depends(get_current_user)):
         conn.execute(text("UPDATE products SET is_active=TRUE WHERE sku=:sku"), {"sku":sku})
     return {"msg":"Recovered"}
 
-# ===== Warehouses =====
-@app.get("/warehouses")
-def get_warehouses(token: dict = Depends(get_current_user)):
-    with engine.connect() as conn:
-        res = conn.execute(text("SELECT * FROM warehouses")).fetchall()
-        return [{"id": r[0], "name": r[1]} for r in res]
-
+# ===== Inventory =====
 @app.get("/inventory")
 def get_inventory(token: dict = Depends(get_current_user)):
     with engine.connect() as conn:
@@ -190,15 +143,8 @@ def get_inventory(token: dict = Depends(get_current_user)):
             FROM inventory i
             JOIN products p ON p.sku=i.sku
             JOIN warehouses w ON w.id=i.warehouse_id
-            ORDER BY w.id, p.sku
         """)).fetchall()
         return [{"warehouse":r[0],"sku":r[1],"name":r[2],"quantity":r[3]} for r in res]
-
-@app.get("/history")
-def get_history(token: dict = Depends(get_current_user)):
-    with engine.connect() as conn:
-        res = conn.execute(text("SELECT * FROM history")).fetchall()
-        return [{"id":r[0],"sku":r[1],"type":r[2],"quantity":r[3],"warehouse_id":r[4],"created_at":r[5]} for r in res]
 
 # ===== PDF =====
 @app.get("/invoice/pdf")

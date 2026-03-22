@@ -1,10 +1,11 @@
 fastapi
 uvicorn
-pyjwt
 sqlalchemy
 passlib
 python-dotenv
 pydantic
+python-jose
+pyjwt
 reportlab
 openpyxl
-python-jose
+streamlit

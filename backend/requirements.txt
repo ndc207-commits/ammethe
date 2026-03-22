@@ -1,7 +1,9 @@
 fastapi
 uvicorn
+pyjwt
 sqlalchemy
-psycopg2-binary
+passlib
 python-dotenv
-reportlab
 pydantic
+reportlab
+openpyxl

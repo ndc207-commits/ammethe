@@ -1,15 +1,15 @@
 import streamlit as st
 import pandas as pd
-from backend_api import api  # hoặc bạn có thể dùng trực tiếp requests nếu không tách module
+import requests
 import os
 
+# ====== URL backend ======
 API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
 
-# ====== Hàm gọi API với token (JWT) ======
+# ====== Hàm gọi API với token ======
 def api(method, endpoint, token=None, **kwargs):
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        import requests
         r = requests.request(method, f"{API_URL}/{endpoint}", headers=headers, **kwargs)
         if r.status_code in [200, 201]:
             return r.json()
@@ -29,11 +29,8 @@ def login():
     st.subheader("Đăng nhập")
     username = st.text_input("Tên người dùng")
     password = st.text_input("Mật khẩu", type="password")
-
     if st.button("Đăng nhập"):
-        import requests
-        form = {"username": username, "password": password}
-        res = requests.post(f"{API_URL}/token", data=form)
+        res = requests.post(f"{API_URL}/token", data={"username": username, "password": password})
         if res.status_code in [200,201]:
             st.session_state["token"] = res.json().get("access_token")
             st.success("Đăng nhập thành công!")
@@ -41,18 +38,17 @@ def login():
         else:
             st.error("Đăng nhập thất bại!")
 
-# ===== Main ======
+# ====== Main ======
 if "token" not in st.session_state:
     login()
 else:
     token = get_token()
     menu = st.sidebar.radio("Menu", [
-        "Kho tổng", "Nhập/Xuất", "Chuyển kho",
-        "Sản phẩm", "Thêm sản phẩm", "Tìm kiếm",
-        "Cảnh báo tồn kho", "Lịch sử", "PDF"
+        "Kho tổng", "Nhập/Xuất", "Sản phẩm", "Thêm sản phẩm",
+        "Tìm kiếm", "Cảnh báo tồn kho", "Lịch sử", "PDF"
     ])
 
-    # ===== SẢN PHẨM =====
+    # ====== SẢN PHẨM ======
     if menu == "Sản phẩm":
         df = api("GET", "products", token=token)
         if not df:
@@ -104,7 +100,7 @@ else:
                             st.success("Đã xóa")
                             st.experimental_rerun()
 
-    # ===== Thêm sản phẩm =====
+    # ====== Thêm sản phẩm ======
     elif menu == "Thêm sản phẩm":
         st.subheader("➕ Thêm sản phẩm mới")
         sku = st.text_input("SKU")
@@ -117,20 +113,20 @@ else:
                 st.success("✅ Thêm thành công")
                 st.experimental_rerun()
 
-    # ===== Kho tổng =====
+    # ====== Kho tổng ======
     elif menu == "Kho tổng":
         df = api("GET", "inventory", token=token)
-        if not df:
-            st.warning("Không có dữ liệu")
-        else:
+        if df:
             df = pd.DataFrame(df)
-            warehouses = df['warehouse'].unique() if not df.empty else []
+            warehouses = df['warehouse'].unique()
             tabs = st.tabs(warehouses)
             for i, wh in enumerate(warehouses):
                 with tabs[i]:
                     st.dataframe(df[df['warehouse']==wh], use_container_width=True)
+        else:
+            st.warning("Không có dữ liệu kho")
 
-    # ===== Nhập / Xuất =====
+    # ====== Nhập / Xuất ======
     elif menu == "Nhập/Xuất":
         df_prod = pd.DataFrame(api("GET","products",token=token))
         df_wh = pd.DataFrame(api("GET","warehouses",token=token))
@@ -151,25 +147,25 @@ else:
                 st.success("✅ OK")
                 st.experimental_rerun()
 
-    # ===== Tìm kiếm =====
+    # ====== Tìm kiếm ======
     elif menu=="Tìm kiếm":
         q = st.text_input("Tìm theo SKU hoặc tên")
         if q:
             df = api("GET", f"products/search?q={q}", token=token)
             st.dataframe(pd.DataFrame(df))
 
-    # ===== Cảnh báo tồn kho =====
+    # ====== Cảnh báo tồn kho ======
     elif menu=="Cảnh báo tồn kho":
         threshold = st.number_input("Ngưỡng tồn kho", min_value=1,value=10)
         df = api("GET", f"inventory/low-stock?threshold={threshold}", token=token)
         st.dataframe(pd.DataFrame(df))
 
-    # ===== Lịch sử =====
+    # ====== Lịch sử ======
     elif menu=="Lịch sử":
         df = api("GET","history",token=token)
         st.dataframe(pd.DataFrame(df))
 
-    # ===== PDF =====
+    # ====== PDF ======
     elif menu=="PDF":
         df_prod = pd.DataFrame(api("GET","products",token=token))
         sel = st.selectbox("Sản phẩm", df_prod["sku"] + " - " + df_prod["name"])

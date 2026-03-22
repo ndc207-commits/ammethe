@@ -134,11 +134,14 @@ elif menu=="Tìm kiếm":
 # ====== Cảnh báo tồn kho ======
 elif menu=="Cảnh báo tồn kho":
     threshold = st.number_input("Ngưỡng tồn kho", min_value=1, value=10)
-    df = api("GET", f"inventory/low-stock?threshold={threshold}")
+    df = api("GET", "inventory")  # Gọi toàn bộ inventory
     if df:
-        st.dataframe(pd.DataFrame(df))
-    else:
-        st.success("Không có sản phẩm nào dưới ngưỡng tồn kho.")
+        df = pd.DataFrame(df)
+        low_stock = df[df["quantity"] < threshold]  # Lọc tồn kho thấp
+        if not low_stock.empty:
+            st.dataframe(low_stock)
+        else:
+            st.success("Không có sản phẩm nào dưới ngưỡng tồn kho.")
 
 # ====== Lịch sử ======
 elif menu=="Lịch sử":

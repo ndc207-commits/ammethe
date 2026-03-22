@@ -1,154 +1,199 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, text
-from jose import JWTError, jwt
+from jose import jwt, JWTError
 from datetime import datetime, timedelta
-from typing import List
-import os
-import io
-from fastapi.responses import StreamingResponse
 from passlib.context import CryptContext
+import os, io
 import pandas as pd
-import openpyxl
+from fastapi.responses import StreamingResponse
+from reportlab.pdfgen import canvas
 
-app = FastAPI(title="Kho AMME THE")
+app = FastAPI()
 
-# ========= DATABASE CONFIG =========
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ===== CONFIG =====
 DATABASE_URL = os.getenv("DATABASE_URL")
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-
-# ========= JWT CONFIG =========
-SECRET_KEY = "mysecretkey"  # Use environment variables in production!
+SECRET_KEY = os.getenv("SECRET_KEY", "secret")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+engine = create_engine(DATABASE_URL)
+pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2 = OAuth2PasswordBearer(tokenUrl="token")
 
-class User(BaseModel):
-    username: str
-    password: str
-    is_admin: bool = False
+# ===== DB =====
+def exec_sql(q, p={}):
+    with engine.begin() as c:
+        c.execute(text(q), p)
 
-# ===== DATABASE TABLES =====
-# Add user table for authentication
+def fetch(q, p={}):
+    with engine.connect() as c:
+        return [dict(r._mapping) for r in c.execute(text(q), p)]
+
+def one(q, p={}):
+    with engine.connect() as c:
+        r = c.execute(text(q), p).fetchone()
+        return dict(r._mapping) if r else None
+
+# ===== TABLE =====
 exec_sql("""
 CREATE TABLE IF NOT EXISTS users (
-    username TEXT PRIMARY KEY,
-    hashed_password TEXT,
-    is_admin BOOLEAN DEFAULT FALSE
+ username TEXT PRIMARY KEY,
+ hashed_password TEXT,
+ is_admin BOOLEAN DEFAULT TRUE
 );
 """)
 
-# ========= HELPER FUNCTIONS =========
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+exec_sql("""
+CREATE TABLE IF NOT EXISTS products (
+ sku TEXT PRIMARY KEY,
+ name TEXT,
+ is_active BOOLEAN DEFAULT TRUE
+);
+""")
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
+exec_sql("""
+CREATE TABLE IF NOT EXISTS warehouses (
+ id SERIAL PRIMARY KEY,
+ name TEXT
+);
+""")
 
-def create_access_token(data: dict, expires_delta: timedelta = timedelta(minutes=15)):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + expires_delta
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+exec_sql("""
+CREATE TABLE IF NOT EXISTS inventory (
+ sku TEXT,
+ warehouse_id INT,
+ quantity INT DEFAULT 0
+);
+""")
 
-def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+exec_sql("""
+CREATE TABLE IF NOT EXISTS history (
+ id SERIAL PRIMARY KEY,
+ sku TEXT,
+ type TEXT,
+ quantity INT,
+ warehouse_id INT,
+ created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+""")
+
+# ===== ADMIN =====
+def init_admin():
+    if not one("SELECT * FROM users WHERE username='admin'"):
+        exec_sql("INSERT INTO users VALUES ('admin', :p, true)",
+                 {"p": pwd.hash("admin1230")})
+init_admin()
+
+# ===== AUTH =====
+def get_user(token=Depends(oauth2)):
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    return username
+        u = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])["sub"]
+    except:
+        raise HTTPException(401)
+    user = one("SELECT * FROM users WHERE username=:u", {"u": u})
+    if not user: raise HTTPException(401)
+    return user
 
-# ========= API ROUTES =========
-
-# Register new user (admin can create users)
-@app.post("/register")
-def register(user: User):
-    hashed_password = get_password_hash(user.password)
-    with engine.begin() as conn:
-        conn.execute(text("""
-        INSERT INTO users (username, hashed_password, is_admin)
-        VALUES (:username, :hashed_password, :is_admin)
-        """), {"username": user.username, "hashed_password": hashed_password, "is_admin": user.is_admin})
-    return {"msg": "User registered successfully"}
-
-# Login and get token
+# ===== LOGIN =====
 @app.post("/token")
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT * FROM users WHERE username=:username"), {"username": form_data.username}).fetchone()
-    
-    if result is None or not verify_password(form_data.password, result["hashed_password"]):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={"sub": form_data.username}, expires_delta=access_token_expires)
-    return {"access_token": access_token, "token_type": "bearer"}
+def login(f: OAuth2PasswordRequestForm = Depends()):
+    user = one("SELECT * FROM users WHERE username=:u", {"u": f.username})
+    if not user or not pwd.verify(f.password, user["hashed_password"]):
+        raise HTTPException(401)
+    token = jwt.encode({"sub": user["username"], "exp": datetime.utcnow()+timedelta(minutes=60)}, SECRET_KEY)
+    return {"access_token": token}
 
-# Protect API with JWT (Example with /products)
+# ===== PRODUCTS =====
 @app.get("/products")
-def get_products(token: str = Depends(oauth2_scheme)):
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT * FROM products")).fetchall()
-        return [{"sku": row[0], "name": row[1]} for row in result]
+def products(u=Depends(get_user)):
+    return fetch("SELECT * FROM products")
+
+@app.post("/products")
+def add_product(p: dict, u=Depends(get_user)):
+    exec_sql("INSERT INTO products VALUES (:sku,:name,true)", p)
+    return {"ok": True}
+
+@app.put("/products/{sku}")
+def update(sku: str, p: dict, u=Depends(get_user)):
+    exec_sql("UPDATE products SET name=:name WHERE sku=:sku", p)
+    return {"ok": True}
+
+@app.delete("/products/{sku}")
+def delete(sku: str, u=Depends(get_user)):
+    exec_sql("UPDATE products SET is_active=false WHERE sku=:s", {"s": sku})
+    return {"ok": True}
+
+@app.post("/products/{sku}/recover")
+def recover(sku: str, u=Depends(get_user)):
+    exec_sql("UPDATE products SET is_active=true WHERE sku=:s", {"s": sku})
+    return {"ok": True}
+
+@app.get("/products/search")
+def search(q: str, u=Depends(get_user)):
+    return fetch("SELECT * FROM products WHERE name ILIKE :q OR sku ILIKE :q", {"q": f"%{q}%"})
+
+# ===== WAREHOUSE =====
+@app.get("/warehouses")
+def wh(u=Depends(get_user)):
+    return fetch("SELECT * FROM warehouses")
 
 # ===== INVENTORY =====
 @app.get("/inventory")
-def inventory(token: str = Depends(oauth2_scheme)):
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-        SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity,0) as quantity
-        FROM inventory i
-        JOIN products p ON p.sku = i.sku
-        JOIN warehouses w ON w.id = i.warehouse_id
-        WHERE p.is_active = TRUE
-        ORDER BY w.id, p.sku
-        """)).fetchall()
-        return [{"warehouse": row[0], "sku": row[1], "name": row[2], "quantity": row[3]} for row in result]
+def inv(u=Depends(get_user)):
+    return fetch("""
+    SELECT w.name warehouse,p.sku,p.name,COALESCE(i.quantity,0) quantity
+    FROM products p
+    LEFT JOIN inventory i ON p.sku=i.sku
+    LEFT JOIN warehouses w ON w.id=i.warehouse_id
+    """)
+
+@app.get("/inventory/low-stock")
+def low(threshold:int=10, u=Depends(get_user)):
+    return fetch("SELECT * FROM inventory WHERE quantity < :t", {"t": threshold})
+
+# ===== TRANSACTION =====
+@app.post("/transaction")
+def trans(d: dict, u=Depends(get_user)):
+    q = d["quantity"] if d["type"]=="Nhập" else -d["quantity"]
+    exec_sql("""
+    INSERT INTO inventory VALUES (:sku,:w,:q)
+    ON CONFLICT DO NOTHING
+    """, {"sku":d["sku"],"w":d["warehouse_id"],"q":q})
+
+    exec_sql("""
+    UPDATE inventory SET quantity = quantity + :q
+    WHERE sku=:sku AND warehouse_id=:w
+    """, {"q":q,"sku":d["sku"],"w":d["warehouse_id"]})
+
+    exec_sql("""
+    INSERT INTO history (sku,type,quantity,warehouse_id)
+    VALUES (:sku,:t,:q,:w)
+    """, {"sku":d["sku"],"t":d["type"],"q":d["quantity"],"w":d["warehouse_id"]})
+
+    return {"ok": True}
+
+# ===== HISTORY =====
+@app.get("/history")
+def hist(u=Depends(get_user)):
+    return fetch("SELECT * FROM history ORDER BY created_at DESC")
 
 # ===== PDF =====
 @app.get("/invoice/pdf")
-def pdf(sku: str, qty: int, type: str):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer)
-
-    c.drawString(100, 800, f"PHIẾU {type}")
-    c.drawString(100, 780, f"SKU: {sku}")
-    c.drawString(100, 760, f"Số lượng: {qty}")
-    c.drawString(100, 740, f"Ngày: {datetime.now()}")
-
+def pdf(sku:str,qty:int,type:str):
+    b=io.BytesIO()
+    c=canvas.Canvas(b)
+    c.drawString(100,800,f"{type}")
+    c.drawString(100,780,sku)
+    c.drawString(100,760,str(qty))
     c.save()
-    buffer.seek(0)
-
-    return StreamingResponse(buffer, media_type="application/pdf")
-
-# ===== EXPORT EXCEL =====
-@app.get("/export/excel")
-def export_excel(token: str = Depends(oauth2_scheme)):
-    df = fetch_all("""
-    SELECT w.name as warehouse, p.sku, p.name, COALESCE(i.quantity,0) as quantity
-    FROM inventory i
-    JOIN products p ON p.sku = i.sku
-    JOIN warehouses w ON w.id = i.warehouse_id
-    WHERE p.is_active = TRUE
-    """)
-    
-    # Create Excel file
-    df_excel = pd.DataFrame(df)
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_excel.to_excel(writer, index=False, sheet_name="Inventory")
-    output.seek(0)
-
-    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=inventory.xlsx"})
+    b.seek(0)
+    return StreamingResponse(b, media_type="application/pdf")

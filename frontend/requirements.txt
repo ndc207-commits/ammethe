@@ -1,6 +1,9 @@
 streamlit
 pandas
-sqlalchemy
 requests
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+reportlab
 openpyxl
-python-dotenv

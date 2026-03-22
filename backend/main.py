@@ -72,15 +72,6 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
     except JWTError:
         raise credentials_exception
 
-# ===== Init admin tự động =====
-with engine.begin() as conn:
-    admin = conn.execute(text("SELECT * FROM users WHERE username='admin'")).fetchone()
-    if not admin:
-        hashed = get_password_hash("admin1230")
-        conn.execute(text(
-            "INSERT INTO users(username,password,role) VALUES ('admin', :p, 'admin')"
-        ), {"p": hashed})
-
 # ===== Routes =====
 @app.post("/register")
 def register(user: User, current_user: dict = Depends(get_current_user)):

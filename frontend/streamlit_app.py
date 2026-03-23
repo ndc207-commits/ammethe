@@ -313,7 +313,24 @@ elif menu == "Cảnh báo tồn kho":
 
 # ===== LỊCH SỬ =====
 elif menu == "Lịch sử":
+    st.subheader("📜 Lịch sử giao dịch")
+
+    # ===== CHỌN KHOẢNG NGÀY =====
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("Từ ngày", pd.Timestamp.now() - pd.Timedelta(days=30))
+    with col2:
+        end_date = st.date_input("Đến ngày", pd.Timestamp.now())
+
+    # ===== LẤY DỮ LIỆU =====
     df = to_df(api_get("history"))
+
+    # ===== LỌC THEO NGÀY =====
+    if not df.empty and "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        mask = (df["timestamp"].dt.date >= start_date) & (df["timestamp"].dt.date <= end_date)
+        df = df.loc[mask]
+
     show_df(df, "Không có dữ liệu")
 
 # ===== PDF =====
@@ -324,19 +341,33 @@ elif menu == "PDF":
         st.warning("Không có sản phẩm")
         st.stop()
 
-    sel = st.selectbox("Sản phẩm", df["sku"] + " - " + df["name"])
-    sku = sel.split(" - ")[0]
+    # ===== CHỌN NHIỀU SẢN PHẨM =====
+    selected_products = st.multiselect(
+        "Chọn sản phẩm", df["sku"] + " - " + df["name"]
+    )
 
-    qty = st.number_input("Qty", 1)
+    qty = st.number_input("Số lượng", 1)
     t = st.selectbox("Type", ["Nhập","Xuất"])
 
-    if st.button("Tạo PDF"):
+    if st.button("Tạo PDF") and selected_products:
         buffer = BytesIO()
         c = canvas.Canvas(buffer)
-        c.drawString(100, 800, f"PHIẾU {t}")
-        c.drawString(100, 780, f"SKU: {sku}")
-        c.drawString(100, 760, f"Số lượng: {qty}")
-        c.drawString(100, 740, pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'))
+        y = 800
+
+        c.drawString(100, y, f"PHIẾU {t}")
+        y -= 20
+        c.drawString(100, y, pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'))
+        y -= 40
+
+        for sel in selected_products:
+            sku = sel.split(" - ")[0]
+            name = sel.split(" - ")[1]
+            c.drawString(100, y, f"SKU: {sku} | Tên: {name} | Số lượng: {qty}")
+            y -= 20
+            if y < 50:  # nếu gần hết trang, tạo trang mới
+                c.showPage()
+                y = 800
+
         c.save()
         buffer.seek(0)
-        st.download_button("Download PDF", buffer, f"invoice_{sku}.pdf", mime="application/pdf")
+        st.download_button("Download PDF", buffer, f"invoice_multi.pdf", mime="application/pdf")

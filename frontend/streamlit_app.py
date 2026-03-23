@@ -7,7 +7,7 @@ from reportlab.pdfgen import canvas
 
 # ===== CONFIG =====
 API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
-st.set_page_config(page_title="Quản lý kho", layout="wide")
+st.set_page_config(page_title="Quản lý kho AMME THE", layout="wide")
 
 # ===== API =====
 @st.cache_data(ttl=5)
@@ -64,7 +64,7 @@ def show_df(df, msg):
         st.dataframe(df, use_container_width=True)
 
 # ===== UI =====
-st.title("📦 Quản lý kho")
+st.title("📦 Quản lý kho AMME THE")
 
 menu = st.sidebar.radio("Menu", [
     "Kho tổng", "Nhập/Xuất", "Chuyển kho",
@@ -96,6 +96,20 @@ if menu == "Sản phẩm":
             st.rerun()
     else:
         st.info("Không có")
+
+# ===== THÊM =====
+elif menu == "Thêm sản phẩm":
+    sku = st.text_input("SKU")
+    name = st.text_input("Tên")
+
+    if st.button("Thêm"):
+        if not sku or not name:
+            st.warning("Nhập đủ")
+        else:
+            api_post("products", {"sku": sku, "name": name})
+            st.toast("Đã thêm", icon="✅")
+            st.rerun()
+
 
 # ===== NHẬP/XUẤT =====
 elif menu == "Nhập/Xuất":
@@ -154,16 +168,15 @@ elif menu == "Chuyển kho":
             st.success("Đã chuyển")
 
 # ===== CẢNH BÁO =====
-elif menu=="Cảnh báo tồn kho":
-    threshold = st.number_input("Ngưỡng tồn kho", min_value=1, value=10)
-    df = api("GET", "inventory")  # Gọi toàn bộ inventory
-    if df:
-        df = pd.DataFrame(df)
-        low_stock = df[df["quantity"] < threshold]  # Lọc tồn kho thấp
-        if not low_stock.empty:
-            st.dataframe(low_stock)
-        else:
-            st.success("Không có sản phẩm nào dưới ngưỡng tồn kho.")
+elif menu == "Cảnh báo tồn kho":
+    threshold = st.number_input("Ngưỡng", 1, 10)
+
+    df = to_df(api_get(f"inventory/low-stock?threshold={threshold}"))
+
+    if df.empty:
+        st.success("OK")
+    else:
+        st.dataframe(df)
 
 # ===== LỊCH SỬ =====
 elif menu == "Lịch sử":

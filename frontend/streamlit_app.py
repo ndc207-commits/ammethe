@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import os
+import time
 from io import BytesIO
 from reportlab.pdfgen import canvas
 
@@ -9,32 +10,44 @@ from reportlab.pdfgen import canvas
 API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
 st.set_page_config(page_title="Quản lý kho AMME THE", layout="wide")
 
-# ===== API HELPERS =====
-@st.cache_data(ttl=5)
-def api_get(endpoint):
+# ===== API HELPERS (FIX RENDER) =====
+def wake_server():
     try:
-        r = requests.get(f"{API_URL}/{endpoint}")
-        if r.status_code == 200:
-            return r.json()
+        requests.get(API_URL, timeout=5)
+        time.sleep(2)
     except:
         pass
+
+@st.cache_data(ttl=5)
+def api_get(endpoint):
+    wake_server()
+    for _ in range(3):
+        try:
+            r = requests.get(f"{API_URL}/{endpoint}", timeout=10)
+            if r.status_code == 200:
+                return r.json()
+        except:
+            time.sleep(2)
     return None
 
 def api_post(endpoint, payload=None):
+    wake_server()
     try:
-        requests.post(f"{API_URL}/{endpoint}", json=payload)
+        requests.post(f"{API_URL}/{endpoint}", json=payload, timeout=10)
     except:
         st.error("Lỗi API POST")
 
 def api_put(endpoint, payload=None):
+    wake_server()
     try:
-        requests.put(f"{API_URL}/{endpoint}", json=payload)
+        requests.put(f"{API_URL}/{endpoint}", json=payload, timeout=10)
     except:
         st.error("Lỗi API PUT")
 
 def api_delete(endpoint):
+    wake_server()
     try:
-        requests.delete(f"{API_URL}/{endpoint}")
+        requests.delete(f"{API_URL}/{endpoint}", timeout=10)
     except:
         st.error("Lỗi API DELETE")
 
@@ -45,12 +58,7 @@ def to_df(data):
     return pd.DataFrame(data)
 
 def safe_df(df, cols):
-    if df.empty:
-        return False
-    for c in cols:
-        if c not in df.columns:
-            return False
-    return True
+    return not df.empty and all(c in df.columns for c in cols)
 
 def filter_active(df):
     if "is_active" in df.columns:
@@ -67,10 +75,6 @@ def get_row(df, sku):
     row = df[df["sku"] == sku]
     return row.iloc[0] if not row.empty else None
 
-def rerun_data():
-    # Reload dữ liệu mà không cần experimental_rerun
-    st.session_state["reload"] = not st.session_state.get("reload", False)
-
 # ===== UI =====
 st.title("📦 Quản lý kho")
 
@@ -80,6 +84,7 @@ menu = st.sidebar.radio("Menu", [
     "Cảnh báo tồn kho",
     "Lịch sử", "PDF"
 ])
+
 
 # ===== KHO TỔNG =====
 if menu == "Kho tổng":
@@ -159,41 +164,92 @@ elif menu == "Chuyển kho":
 
 # ===== SẢN PHẨM =====
 elif menu == "Sản phẩm":
-    df = to_df(api_get("products"))
+    with st.spinner("🔄 Đang tải sản phẩm..."):
+        df = to_df(api_get("products"))
+        df_inv = to_df(api_get("inventory"))  # để lấy warehouse
 
-    if not safe_df(df, ["sku","name"]):
-        st.warning("API products lỗi hoặc không có dữ liệu")
+    # ===== FIX API =====
+    if df.empty:
+        st.warning("⚠️ Không có dữ liệu (server có thể đang sleep)")
         st.stop()
+
+    if "sku" not in df.columns or "name" not in df.columns:
+        st.error(f"❌ Sai format API: {df.columns}")
+        st.stop()
+
+    # ===== GỘP WAREHOUSE =====
+    if not df_inv.empty and "sku" in df_inv.columns:
+        df = df.merge(df_inv[["sku", "warehouse"]], on="sku", how="left")
+
+    # ===== FILTER UI =====
+    col1, col2 = st.columns(2)
+
+    # 🔍 SEARCH REALTIME
+    with col1:
+        keyword = st.text_input("🔍 Tìm kiếm (realtime)")
+
+    # 🏬 FILTER WAREHOUSE
+    with col2:
+        if "warehouse" in df.columns:
+            warehouses = ["Tất cả"] + sorted(df["warehouse"].dropna().unique().tolist())
+            selected_wh = st.selectbox("🏬 Lọc theo kho", warehouses)
+        else:
+            selected_wh = "Tất cả"
+
+    # ===== APPLY FILTER =====
+    if keyword:
+        df = df[
+            df["name"].str.contains(keyword, case=False, na=False) |
+            df["sku"].str.contains(keyword, case=False, na=False)
+        ]
+
+    if selected_wh != "Tất cả" and "warehouse" in df.columns:
+        df = df[df["warehouse"] == selected_wh]
 
     df_active = filter_active(df)
     df_deleted = df[df["is_active"] == False] if "is_active" in df.columns else pd.DataFrame()
 
-    # --- Hiển thị sản phẩm đang hoạt động ---
+    # ===== HIỂN THỊ =====
     st.subheader("🟢 Sản phẩm đang hoạt động")
     show_df(df_active, "Chưa có sản phẩm")
 
-    # --- Hiển thị sản phẩm đã xóa ---
     st.subheader("🔴 Sản phẩm đã xóa")
     if not df_deleted.empty:
-        sel_deleted = st.selectbox("Chọn sản phẩm phục hồi", df_deleted["sku"] + " - " + df_deleted["name"])
+        sel_deleted = st.selectbox(
+            "Chọn sản phẩm phục hồi",
+            df_deleted["sku"] + " - " + df_deleted["name"]
+        )
         sku_del = sel_deleted.split(" - ")[0]
+
         if st.button("♻️ Phục hồi sản phẩm"):
             api_post(f"products/{sku_del}/recover")
             st.success(f"Đã phục hồi {sku_del}")
-            rerun_data()
+            time.sleep(1)
+            st.rerun()
     else:
         st.info("Không có sản phẩm đã xóa")
 
-    # --- Chỉnh sửa / Xóa sản phẩm ---
+    # ===== EDIT / DELETE =====
     st.subheader("✏️ Sửa / 🗑 Xóa sản phẩm")
-    if not df_active.empty:
-        sel_active = st.selectbox("Chọn sản phẩm", df_active["sku"] + " - " + df_active["name"])
-        sku = sel_active.split(" - ")[0]
-        current_name = get_row(df_active, sku)["name"]
 
+    if not df_active.empty:
+        sel_active = st.selectbox(
+            "Chọn sản phẩm",
+            df_active["sku"] + " - " + df_active["name"]
+        )
+        sku = sel_active.split(" - ")[0]
+
+        row = get_row(df_active, sku)
+        if row is None:
+            st.error("Không tìm thấy sản phẩm")
+            st.stop()
+
+        current_name = row["name"]
         new_name = st.text_input("Tên mới", current_name)
 
         col1, col2 = st.columns(2)
+
+        # UPDATE
         with col1:
             if st.button("💾 Cập nhật"):
                 if new_name.strip() == "":
@@ -201,9 +257,12 @@ elif menu == "Sản phẩm":
                 elif new_name != current_name:
                     api_put(f"products/{sku}", {"name": new_name})
                     st.success(f"Đã cập nhật {sku}")
-                    rerun_data()
+                    time.sleep(1)
+                    st.rerun()
                 else:
                     st.info("Tên không thay đổi")
+
+        # DELETE
         with col2:
             confirm = st.checkbox("Xác nhận xóa sản phẩm")
             if st.button("🗑 Xóa"):
@@ -212,8 +271,9 @@ elif menu == "Sản phẩm":
                 else:
                     api_delete(f"products/{sku}")
                     st.success(f"Đã xóa {sku}")
-                    rerun_data()
-
+                    time.sleep(1)
+                    st.rerun()
+                    
 # ===== THÊM SẢN PHẨM =====
 elif menu == "Thêm sản phẩm":
     sku = st.text_input("SKU")

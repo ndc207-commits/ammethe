@@ -67,8 +67,12 @@ def get_row(df, sku):
     row = df[df["sku"] == sku]
     return row.iloc[0] if not row.empty else None
 
+def rerun_data():
+    # Reload dữ liệu mà không cần experimental_rerun
+    st.session_state["reload"] = not st.session_state.get("reload", False)
+
 # ===== UI =====
-st.title("📦 Quản lý kho AMME THE")
+st.title("📦 Quản lý kho")
 
 menu = st.sidebar.radio("Menu", [
     "Kho tổng", "Nhập/Xuất", "Chuyển kho",
@@ -90,13 +94,10 @@ if menu == "Kho tổng":
         st.error("Dữ liệu kho API sai, thiếu cột 'warehouse'")
     else:
         warehouses = df['warehouse'].unique()
-        if len(warehouses) == 0:
-            st.info("Không có kho nào")
-        else:
-            for wh in warehouses:
-                st.subheader(f"📦 {wh}")
-                df_wh = df[df['warehouse'] == wh]
-                st.dataframe(df_wh, use_container_width=True)
+        for wh in warehouses:
+            st.subheader(f"📦 {wh}")
+            df_wh = df[df['warehouse'] == wh]
+            st.dataframe(df_wh, use_container_width=True)
 
 # ===== NHẬP/XUẤT =====
 elif menu == "Nhập/Xuất":
@@ -124,6 +125,7 @@ elif menu == "Nhập/Xuất":
             "warehouse_id": wh_id
         })
         st.success("Thành công")
+        rerun_data()
 
 # ===== CHUYỂN KHO =====
 elif menu == "Chuyển kho":
@@ -153,6 +155,7 @@ elif menu == "Chuyển kho":
             api_post("transaction", {"sku": sku, "type": "Nhập", "quantity": qty, "warehouse_id": id_to})
 
             st.success("Đã chuyển")
+            rerun_data()
 
 # ===== SẢN PHẨM =====
 elif menu == "Sản phẩm":
@@ -177,7 +180,7 @@ elif menu == "Sản phẩm":
         if st.button("♻️ Phục hồi sản phẩm"):
             api_post(f"products/{sku_del}/recover")
             st.success(f"Đã phục hồi {sku_del}")
-            st.experimental_rerun()
+            rerun_data()
     else:
         st.info("Không có sản phẩm đã xóa")
 
@@ -198,7 +201,7 @@ elif menu == "Sản phẩm":
                 elif new_name != current_name:
                     api_put(f"products/{sku}", {"name": new_name})
                     st.success(f"Đã cập nhật {sku}")
-                    st.experimental_rerun()
+                    rerun_data()
                 else:
                     st.info("Tên không thay đổi")
         with col2:
@@ -209,7 +212,7 @@ elif menu == "Sản phẩm":
                 else:
                     api_delete(f"products/{sku}")
                     st.success(f"Đã xóa {sku}")
-                    st.experimental_rerun()
+                    rerun_data()
 
 # ===== THÊM SẢN PHẨM =====
 elif menu == "Thêm sản phẩm":
@@ -222,7 +225,7 @@ elif menu == "Thêm sản phẩm":
         else:
             api_post("products", {"sku": sku, "name": name})
             st.success("Đã thêm")
-            st.experimental_rerun()
+            rerun_data()
 
 # ===== CẢNH BÁO TỒN KHO =====
 elif menu == "Cảnh báo tồn kho":
@@ -234,17 +237,14 @@ elif menu == "Cảnh báo tồn kho":
     if df.empty:
         st.success("✅ Tất cả sản phẩm đều đủ hàng")
     else:
-        # Highlight bảng
         def highlight(row):
             if row["quantity"] <= threshold * 0.5:
                 return ["background-color: red; color: white"]*len(row)
             elif row["quantity"] < threshold:
                 return ["background-color: orange"]*len(row)
             return [""]*len(row)
-
         st.dataframe(df.style.apply(highlight, axis=1), use_container_width=True)
 
-        # Chi tiết cảnh báo
         for _, row in df.iterrows():
             if row["quantity"] <= threshold * 0.5:
                 st.error(f"{row['sku']} - {row['name']} | {row['warehouse']} | Còn: {row['quantity']}")
@@ -279,4 +279,4 @@ elif menu == "PDF":
         c.drawString(100, 740, pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'))
         c.save()
         buffer.seek(0)
-        st.download_button("Download", buffer, f"{sku}.pdf")
+        st.download_button("Download PDF", buffer, f"invoice_{sku}.pdf", mime="application/pdf")

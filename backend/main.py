@@ -99,6 +99,34 @@ def transaction(data: dict):
                      {"sku":sku,"t":type_,"q":qty,"wh":wh_id,"dt":datetime.utcnow()})
     return {"msg":"OK"}
 
+# ===== LOW STOCK =====
+@app.get("/inventory/low-stock")
+def low_stock(threshold: int = 10):
+    with engine.connect() as conn:
+        res = conn.execute(text("""
+            SELECT 
+                p.sku,
+                p.name,
+                w.name as warehouse,
+                COALESCE(i.quantity,0) as quantity
+            FROM products p
+            JOIN inventory i ON p.sku = i.sku
+            JOIN warehouses w ON w.id = i.warehouse_id
+            WHERE COALESCE(i.quantity,0) < :threshold
+            AND COALESCE(p.is_active, TRUE) = TRUE
+            ORDER BY quantity ASC
+        """), {"threshold": threshold}).fetchall()
+
+        return [
+            {
+                "sku": r[0],
+                "name": r[1],
+                "warehouse": r[2],
+                "quantity": r[3]
+            }
+            for r in res
+        ]
+
 # ===== HISTORY =====
 @app.get("/history")
 def history():

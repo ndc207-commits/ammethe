@@ -73,6 +73,27 @@ menu = st.sidebar.radio("Menu", [
     "Lịch sử", "PDF"
 ])
 
+# ===== KHO TỔNG =====
+if menu == "Kho tổng":
+    st.subheader("📦 Kho tổng")
+    with st.spinner("Đang tải dữ liệu kho..."):
+        data = api_get("inventory")
+        df = to_df(data)
+
+    if df.empty:
+        st.warning("Không có dữ liệu kho")
+    elif "warehouse" not in df.columns:
+        st.error("Dữ liệu kho API sai, thiếu cột 'warehouse'")
+    else:
+        warehouses = df['warehouse'].unique()
+        if len(warehouses) == 0:
+            st.info("Không có kho nào")
+        else:
+            for wh in warehouses:
+                st.subheader(f"📦 {wh}")
+                df_wh = df[df['warehouse'] == wh]
+                st.dataframe(df_wh, use_container_width=True)
+
 # ===== SẢN PHẨM =====
 if menu == "Sản phẩm":
     df = to_df(api_get("products"))

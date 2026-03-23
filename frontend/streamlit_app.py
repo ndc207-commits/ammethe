@@ -9,7 +9,7 @@ from reportlab.pdfgen import canvas
 API_URL = os.getenv("API_URL", "https://quanlykho-backend1.onrender.com")
 st.set_page_config(page_title="Quản lý kho AMME THE", layout="wide")
 
-# ===== API =====
+# ===== API HELPERS =====
 @st.cache_data(ttl=5)
 def api_get(endpoint):
     try:
@@ -24,21 +24,21 @@ def api_post(endpoint, payload=None):
     try:
         requests.post(f"{API_URL}/{endpoint}", json=payload)
     except:
-        st.error("Lỗi API")
+        st.error("Lỗi API POST")
 
 def api_put(endpoint, payload=None):
     try:
         requests.put(f"{API_URL}/{endpoint}", json=payload)
     except:
-        st.error("Lỗi API")
+        st.error("Lỗi API PUT")
 
 def api_delete(endpoint):
     try:
         requests.delete(f"{API_URL}/{endpoint}")
     except:
-        st.error("Lỗi API")
+        st.error("Lỗi API DELETE")
 
-# ===== HELPERS =====
+# ===== DATA HELPERS =====
 def to_df(data):
     if not data:
         return pd.DataFrame()
@@ -62,6 +62,10 @@ def show_df(df, msg):
         st.info(msg)
     else:
         st.dataframe(df, use_container_width=True)
+
+def get_row(df, sku):
+    row = df[df["sku"] == sku]
+    return row.iloc[0] if not row.empty else None
 
 # ===== UI =====
 st.title("📦 Quản lý kho AMME THE")
@@ -93,44 +97,6 @@ if menu == "Kho tổng":
                 st.subheader(f"📦 {wh}")
                 df_wh = df[df['warehouse'] == wh]
                 st.dataframe(df_wh, use_container_width=True)
-
-# ===== SẢN PHẨM =====
-if menu == "Sản phẩm":
-    df = to_df(api_get("products"))
-
-    if not safe_df(df, ["sku","name"]):
-        st.warning("API products lỗi hoặc không có dữ liệu")
-        st.stop()
-
-    df_active = filter_active(df)
-    df_deleted = df[df["is_active"] == False] if "is_active" in df.columns else pd.DataFrame()
-
-    st.subheader("🟢 Hoạt động")
-    show_df(df_active, "Chưa có sản phẩm")
-
-    st.subheader("🔴 Đã xóa")
-    if not df_deleted.empty:
-        sel = st.selectbox("Phục hồi", df_deleted["sku"] + " - " + df_deleted["name"])
-        sku = sel.split(" - ")[0]
-        if st.button("Phục hồi"):
-            api_post(f"products/{sku}/recover")
-            st.rerun()
-    else:
-        st.info("Không có")
-
-# ===== THÊM =====
-elif menu == "Thêm sản phẩm":
-    sku = st.text_input("SKU")
-    name = st.text_input("Tên")
-
-    if st.button("Thêm"):
-        if not sku or not name:
-            st.warning("Nhập đủ")
-        else:
-            api_post("products", {"sku": sku, "name": name})
-            st.toast("Đã thêm", icon="✅")
-            st.rerun()
-
 
 # ===== NHẬP/XUẤT =====
 elif menu == "Nhập/Xuất":
@@ -188,16 +154,102 @@ elif menu == "Chuyển kho":
 
             st.success("Đã chuyển")
 
-# ===== CẢNH BÁO =====
+# ===== SẢN PHẨM =====
+elif menu == "Sản phẩm":
+    df = to_df(api_get("products"))
+
+    if not safe_df(df, ["sku","name"]):
+        st.warning("API products lỗi hoặc không có dữ liệu")
+        st.stop()
+
+    df_active = filter_active(df)
+    df_deleted = df[df["is_active"] == False] if "is_active" in df.columns else pd.DataFrame()
+
+    # --- Hiển thị sản phẩm đang hoạt động ---
+    st.subheader("🟢 Sản phẩm đang hoạt động")
+    show_df(df_active, "Chưa có sản phẩm")
+
+    # --- Hiển thị sản phẩm đã xóa ---
+    st.subheader("🔴 Sản phẩm đã xóa")
+    if not df_deleted.empty:
+        sel_deleted = st.selectbox("Chọn sản phẩm phục hồi", df_deleted["sku"] + " - " + df_deleted["name"])
+        sku_del = sel_deleted.split(" - ")[0]
+        if st.button("♻️ Phục hồi sản phẩm"):
+            api_post(f"products/{sku_del}/recover")
+            st.success(f"Đã phục hồi {sku_del}")
+            st.experimental_rerun()
+    else:
+        st.info("Không có sản phẩm đã xóa")
+
+    # --- Chỉnh sửa / Xóa sản phẩm ---
+    st.subheader("✏️ Sửa / 🗑 Xóa sản phẩm")
+    if not df_active.empty:
+        sel_active = st.selectbox("Chọn sản phẩm", df_active["sku"] + " - " + df_active["name"])
+        sku = sel_active.split(" - ")[0]
+        current_name = get_row(df_active, sku)["name"]
+
+        new_name = st.text_input("Tên mới", current_name)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("💾 Cập nhật"):
+                if new_name.strip() == "":
+                    st.warning("Tên mới không được để trống")
+                elif new_name != current_name:
+                    api_put(f"products/{sku}", {"name": new_name})
+                    st.success(f"Đã cập nhật {sku}")
+                    st.experimental_rerun()
+                else:
+                    st.info("Tên không thay đổi")
+        with col2:
+            confirm = st.checkbox("Xác nhận xóa sản phẩm")
+            if st.button("🗑 Xóa"):
+                if not confirm:
+                    st.warning("Cần xác nhận trước khi xóa")
+                else:
+                    api_delete(f"products/{sku}")
+                    st.success(f"Đã xóa {sku}")
+                    st.experimental_rerun()
+
+# ===== THÊM SẢN PHẨM =====
+elif menu == "Thêm sản phẩm":
+    sku = st.text_input("SKU")
+    name = st.text_input("Tên sản phẩm")
+
+    if st.button("Thêm"):
+        if not sku or not name:
+            st.warning("Nhập đủ thông tin")
+        else:
+            api_post("products", {"sku": sku, "name": name})
+            st.success("Đã thêm")
+            st.experimental_rerun()
+
+# ===== CẢNH BÁO TỒN KHO =====
 elif menu == "Cảnh báo tồn kho":
-    threshold = st.number_input("Ngưỡng", 1, 10)
+    st.subheader("⚠️ Cảnh báo tồn kho")
+    threshold = st.number_input("Ngưỡng cảnh báo", min_value=1, value=10)
 
     df = to_df(api_get(f"inventory/low-stock?threshold={threshold}"))
 
     if df.empty:
-        st.success("OK")
+        st.success("✅ Tất cả sản phẩm đều đủ hàng")
     else:
-        st.dataframe(df)
+        # Highlight bảng
+        def highlight(row):
+            if row["quantity"] <= threshold * 0.5:
+                return ["background-color: red; color: white"]*len(row)
+            elif row["quantity"] < threshold:
+                return ["background-color: orange"]*len(row)
+            return [""]*len(row)
+
+        st.dataframe(df.style.apply(highlight, axis=1), use_container_width=True)
+
+        # Chi tiết cảnh báo
+        for _, row in df.iterrows():
+            if row["quantity"] <= threshold * 0.5:
+                st.error(f"{row['sku']} - {row['name']} | {row['warehouse']} | Còn: {row['quantity']}")
+            else:
+                st.warning(f"{row['sku']} - {row['name']} | {row['warehouse']} | Còn: {row['quantity']}")
 
 # ===== LỊCH SỬ =====
 elif menu == "Lịch sử":
@@ -227,5 +279,4 @@ elif menu == "PDF":
         c.drawString(100, 740, pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'))
         c.save()
         buffer.seek(0)
-
         st.download_button("Download", buffer, f"{sku}.pdf")

@@ -81,7 +81,8 @@ menu = st.sidebar.radio("Menu", [
     "Kho tổng", "Nhập/Xuất", "Chuyển kho",
     "Sản phẩm", "Thêm sản phẩm",
     "Cảnh báo tồn kho",
-    "Lịch sử", "PDF"
+    "Lịch sử", "PDF",
+    "Xuất Excel"
 ])
 
 
@@ -129,7 +130,7 @@ elif menu == "Nhập/Xuất":
             "warehouse_id": wh_id
         })
         st.success("Thành công")
-        rerun_data()
+        sr.rerun()
 
 # ===== CHUYỂN KHO =====
 elif menu == "Chuyển kho":
@@ -159,7 +160,7 @@ elif menu == "Chuyển kho":
             api_post("transaction", {"sku": sku, "type": "Nhập", "quantity": qty, "warehouse_id": id_to})
 
             st.success("Đã chuyển")
-            rerun_data()
+            st.rerun()
 
 # ===== SẢN PHẨM =====
 elif menu == "Sản phẩm":
@@ -284,7 +285,7 @@ elif menu == "Thêm sản phẩm":
         else:
             api_post("products", {"sku": sku, "name": name})
             st.success("Đã thêm")
-            rerun_data()
+            st.rerun()
 
 # ===== CẢNH BÁO TỒN KHO =====
 elif menu == "Cảnh báo tồn kho":
@@ -370,3 +371,79 @@ elif menu == "PDF":
         c.save()
         buffer.seek(0)
         st.download_button("Download PDF", buffer, f"invoice_multi.pdf", mime="application/pdf")
+
+#==== Xuat excel======
+elif menu == "Xuất Excel":
+    st.subheader("📊 Xuất Excel")
+
+    if st.button("📥 Tạo báo cáo Excel"):
+        with st.spinner("Đang tạo báo cáo chuyên nghiệp..."):
+
+            df_prod = to_df(api_get("products"))
+            df_inv = to_df(api_get("inventory"))
+            df_hist = to_df(api_get("history"))
+
+            buffer = BytesIO()
+
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+
+                # ===== PRODUCTS =====
+                if not df_prod.empty:
+                    df_prod.to_excel(writer, sheet_name="Products", index=False)
+                    ws = writer.sheets["Products"]
+
+                    for col in ws.columns:
+                        ws.column_dimensions[col[0].column_letter].width = 20
+
+                # ===== INVENTORY =====
+                if not df_inv.empty:
+                    df_inv.to_excel(writer, sheet_name="Inventory", index=False)
+                    ws = writer.sheets["Inventory"]
+
+                    for col in ws.columns:
+                        ws.column_dimensions[col[0].column_letter].width = 20
+
+                    # Highlight low stock
+                    from openpyxl.styles import PatternFill
+                    red_fill = PatternFill(start_color="FF9999", end_color="FF9999", fill_type="solid")
+
+                    if "quantity" in df_inv.columns:
+                        for row in range(2, len(df_inv) + 2):
+                            qty = ws[f"D{row}"].value  # cột quantity (có thể là D)
+                            if qty is not None and qty < 10:
+                                for col in ["A","B","C","D"]:
+                                    ws[f"{col}{row}"].fill = red_fill
+
+                # ===== HISTORY =====
+                if not df_hist.empty:
+                    if "timestamp" in df_hist.columns:
+                        df_hist["timestamp"] = pd.to_datetime(df_hist["timestamp"], errors='coerce')
+
+                    df_hist.to_excel(writer, sheet_name="History", index=False)
+                    ws = writer.sheets["History"]
+
+                    for col in ws.columns:
+                        ws.column_dimensions[col[0].column_letter].width = 22
+
+                # ===== SUMMARY =====
+                if not df_hist.empty and "type" in df_hist.columns:
+
+                    summary = df_hist.groupby("type")["quantity"].sum().reset_index()
+                    summary.columns = ["Loại", "Tổng số lượng"]
+
+                    summary.to_excel(writer, sheet_name="Summary", index=False)
+                    ws = writer.sheets["Summary"]
+
+                    for col in ws.columns:
+                        ws.column_dimensions[col[0].column_letter].width = 25
+
+            buffer.seek(0)
+
+            filename = f"report_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+            st.download_button(
+                "⬇️ Download Excel PRO",
+                buffer,
+                filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )

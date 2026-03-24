@@ -17,7 +17,6 @@ def wake_server():
         time.sleep(2)
     except:
         pass
-
 @st.cache_data(ttl=5)
 def api_get(endpoint):
     wake_server()
